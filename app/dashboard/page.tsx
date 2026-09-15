@@ -9,6 +9,10 @@ export default async function DashboardPage() {
     .select("*")
     .order("team");
 
+  const { count: scheduleCount } = await supabase
+    .from("schedule")
+    .select("*", { count: "exact", head: true });
+
   const { data: recentGames } = await supabase
     .from("schedule")
     .select("*")
@@ -30,9 +34,12 @@ export default async function DashboardPage() {
   return (
     <div style={{ padding: 24, fontFamily: "system-ui", background: "#0f172a", color: "#e2e8f0", minHeight: "100vh" }}>
       <h1 style={{ fontSize: 20, marginBottom: 4 }}>NBA-malli — automaattinen data</h1>
-      <p style={{ color: "#64748b", fontSize: 13, marginBottom: 24 }}>
+      <p style={{ color: "#64748b", fontSize: 13, marginBottom: 4 }}>
         Tämä sivu lukee suoraan Supabase-tietokannasta. Jos taulukko alla on tyhjä,
         cron-tehtäviä ei ole vielä ajettu kertaakaan — ks. README kohta &quot;Ensimmäinen ajo&quot;.
+      </p>
+      <p style={{ color: "#34d399", fontSize: 13, marginBottom: 24 }}>
+        Koko otteluohjelmassa on {scheduleCount ?? 0} ottelua tietokannassa.
       </p>
 
       <h2 style={{ fontSize: 14, marginBottom: 8 }}>Team stats ({teams?.length ?? 0} riviä)</h2>
