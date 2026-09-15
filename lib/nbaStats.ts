@@ -16,12 +16,26 @@ const NBA_HEADERS: Record<string, string> = {
   "Cache-Control": "no-cache",
 };
 
-export async function nbaStatsFetch(url: string): Promise<any> {
-  const res = await fetch(url, { headers: NBA_HEADERS, cache: "no-store" });
-  if (!res.ok) {
-    throw new Error(`stats.nba.com vastasi ${res.status}: ${await res.text()}`);
+export async function nbaStatsFetch(url: string, timeoutMs = 8000): Promise<any> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { headers: NBA_HEADERS, cache: "no-store", signal: controller.signal });
+    if (!res.ok) {
+      throw new Error(`stats.nba.com vastasi ${res.status}: ${await res.text()}`);
+    }
+    return await res.json();
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      throw new Error(
+        `Aikakatkaisu (${timeoutMs}ms) — stats.nba.com ei vastannut. Tämä voi tarkoittaa että ` +
+        `NBA:n rajapinta estää pilvipalvelimien (Vercel) IP-osoitteita.`
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
   }
-  return res.json();
 }
 
 // Muuntaa NBA:n rajapinnan "resultSets"-muodon (headers+rowSet) taulukoksi objekteja.
