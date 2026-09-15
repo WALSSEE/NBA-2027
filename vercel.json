@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/update-nba-data",
+      "schedule": "0 10 * * *"
+    },
+    {
+      "path": "/api/cron/update-schedule",
+      "schedule": "0 9 * * 1"
+    }
+  ]
+}
