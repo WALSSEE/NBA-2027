@@ -41,6 +41,15 @@ export default function TransactionsPage() {
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
+  // --- Rosteripaneeli: näyttää valitun joukkueen minuuttijakauman, jotta
+  // vapautuneet minuutit (esim. 3 pelaajaa lähtee eikä rotaatiopelaajia tule
+  // tilalle) voi jakaa käsin jäljelle jääville pelaajille ja nähdä milloin
+  // summa on taas lähellä 240:tä.
+  const [rosterTeam, setRosterTeam] = useState(ALL_TEAMS[0] ?? "");
+  const [rosterEdits, setRosterEdits] = useState<Record<string, number>>({});
+  const [rosterSaving, setRosterSaving] = useState(false);
+  const [rosterStatus, setRosterStatus] = useState<string | null>(null);
+
   useEffect(() => {
     setSecret(localStorage.getItem("cron_secret") ?? "");
     loadPlayers();
@@ -87,6 +96,11 @@ export default function TransactionsPage() {
     setNewTeam(p.team);
     setNewMpg(p.mpg_base);
     setStatus(null);
+    // Rosteripaneeli seuraa automaattisesti lähtevän pelaajan joukkuetta,
+    // koska siellä vapautuvat minuutit yleensä pitää jakaa uudelleen.
+    setRosterTeam(p.team);
+    setRosterEdits({});
+    setRosterStatus(null);
   }
 
   const preview = useMemo(() => {
@@ -128,6 +142,62 @@ export default function TransactionsPage() {
     } finally {
       setSaving(false);
     }
+  }
+
+  const rosterPlayers = useMemo(
+    () =>
+      players
+        .filter((p) => p.team === rosterTeam)
+        .sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0) || (rosterEdits[b.id] ?? b.mpg_base) - (rosterEdits[a.id] ?? a.mpg_base)),
+    [players, rosterTeam, rosterEdits]
+  );
+
+  const rosterTotalMinutes = useMemo(
+    () => rosterPlayers.filter((p) => p.active).reduce((sum, p) => sum + (rosterEdits[p.id] ?? p.mpg_base), 0),
+    [rosterPlayers, rosterEdits]
+  );
+
+  const rosterChangedCount = useMemo(
+    () => rosterPlayers.filter((p) => rosterEdits[p.id] !== undefined && rosterEdits[p.id] !== p.mpg_base).length,
+    [rosterPlayers, rosterEdits]
+  );
+
+  function setRosterMinutes(playerId: string, value: number) {
+    setRosterEdits((prev) => ({ ...prev, [playerId]: value }));
+  }
+
+  // Tallentaa kaikki rosteripaneelissa muutetut minuutit yksi kerrallaan
+  // samana "sama joukkue, uudet minuutit" -transaktiona kuin muutkin
+  // minuuttipäivitykset — näin vapautuneet minuutit saa jaettua jäljelle
+  // jääville pelaajille ilman että joutuu käymään erikseen jokaista
+  // pelaajaa läpi hakukentän kautta.
+  async function saveRosterMinutes() {
+    setRosterSaving(true);
+    setRosterStatus(null);
+    localStorage.setItem("cron_secret", secret);
+    const changed = rosterPlayers.filter((p) => rosterEdits[p.id] !== undefined && rosterEdits[p.id] !== p.mpg_base);
+    if (changed.length === 0) {
+      setRosterStatus("Ei muutoksia tallennettavaksi.");
+      setRosterSaving(false);
+      return;
+    }
+    let okCount = 0;
+    for (const p of changed) {
+      try {
+        const res = await fetch("/api/transactions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+          body: JSON.stringify({ playerId: p.id, newTeam: p.team, newMpg: rosterEdits[p.id] }),
+        });
+        if (res.ok) okCount += 1;
+      } catch {
+        // jatketaan silti loput
+      }
+    }
+    setRosterStatus(`Tallennettu ${okCount}/${changed.length} pelaajan minuutit.`);
+    setRosterEdits({});
+    await Promise.all([loadPlayers(), loadTransactions()]);
+    setRosterSaving(false);
   }
 
   const teamNetImpact = useMemo(() => {
@@ -291,6 +361,116 @@ export default function TransactionsPage() {
           )}
         </div>
       )}
+
+      <div style={{ maxWidth: 640, marginBottom: 32, border: "1px solid #334155", borderRadius: 8, padding: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <div style={{ fontSize: 15, fontWeight: 600 }}>Joukkueen rosteri ja minuutit</div>
+          <select
+            value={rosterTeam}
+            onChange={(e) => {
+              setRosterTeam(e.target.value);
+              setRosterEdits({});
+              setRosterStatus(null);
+            }}
+            style={{
+              background: "#1e293b",
+              color: "#e2e8f0",
+              border: "1px solid #334155",
+              borderRadius: 6,
+              padding: "4px 8px",
+              fontSize: 12,
+            }}
+          >
+            {ALL_TEAMS.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p style={{ color: "#64748b", fontSize: 11, marginBottom: 12 }}>
+          Kun pelaajia lähtee eikä tilalle tule rotaatiopelaajia, vapautuneet minuutit pitää
+          jakaa käsin jäljelle jääville — muokkaa minuutteja suoraan tästä, seuraa summaa (tavoite
+          n. 240) ja tallenna.
+        </p>
+        <div
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            marginBottom: 8,
+            color: Math.abs(rosterTotalMinutes - 240) <= 5 ? "#4ade80" : Math.abs(rosterTotalMinutes - 240) <= 15 ? "#fbbf24" : "#f87171",
+          }}
+        >
+          Aktiivisten pelaajien minuutit yhteensä: {rosterTotalMinutes.toFixed(0)} / 240
+        </div>
+        <div style={{ maxHeight: 320, overflow: "auto" }}>
+          {rosterPlayers.length === 0 && (
+            <div style={{ color: "#64748b", fontSize: 12 }}>Ei pelaajia tässä joukkueessa.</div>
+          )}
+          {rosterPlayers.map((p) => {
+            const val = rosterEdits[p.id] ?? p.mpg_base;
+            const changed = rosterEdits[p.id] !== undefined && rosterEdits[p.id] !== p.mpg_base;
+            return (
+              <div
+                key={p.id}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "4px 0",
+                  borderBottom: "1px solid #1e293b",
+                  opacity: p.active ? 1 : 0.5,
+                }}
+              >
+                <span style={{ fontSize: 12 }}>
+                  {p.name} <span style={{ color: "#64748b" }}>({p.pos || "—"})</span>
+                  {!p.active && <span style={{ color: "#64748b" }}> · inaktiivinen</span>}
+                </span>
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 11, color: "#64748b" }}>
+                    {p.oepm}/{p.depm}
+                  </span>
+                  <input
+                    type="number"
+                    value={val}
+                    onChange={(e) => setRosterMinutes(p.id, parseFloat(e.target.value) || 0)}
+                    style={{
+                      width: 56,
+                      background: changed ? "#1e3a2e" : "#1e293b",
+                      color: "#e2e8f0",
+                      border: `1px solid ${changed ? "#4ade80" : "#334155"}`,
+                      borderRadius: 4,
+                      padding: "3px 6px",
+                      fontSize: 12,
+                    }}
+                  />
+                </span>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12 }}>
+          <button
+            onClick={saveRosterMinutes}
+            disabled={rosterSaving || !secret || rosterChangedCount === 0}
+            style={{
+              background: rosterSaving || !secret || rosterChangedCount === 0 ? "#334155" : "#2563eb",
+              color: "white",
+              border: "none",
+              borderRadius: 6,
+              padding: "8px 16px",
+              fontSize: 13,
+              cursor: rosterSaving || !secret || rosterChangedCount === 0 ? "not-allowed" : "pointer",
+            }}
+          >
+            {rosterSaving ? "Tallennetaan..." : `Tallenna minuuttimuutokset (${rosterChangedCount})`}
+          </button>
+          {rosterStatus && (
+            <span style={{ fontSize: 12, color: rosterStatus.startsWith("Ei") ? "#94a3b8" : "#4ade80" }}>{rosterStatus}</span>
+          )}
+        </div>
+      </div>
 
       <h2 style={{ fontSize: 16, marginTop: 32, marginBottom: 8 }}>Joukkueiden nettovaikutus transaktioista</h2>
       {loadingTx ? (

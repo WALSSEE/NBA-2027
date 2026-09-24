@@ -30,17 +30,6 @@ export default async function DashboardPage() {
   return (
     <div style={{ padding: 24, fontFamily: "system-ui", background: "#0f172a", color: "#e2e8f0", minHeight: "100vh" }}>
       <h1 style={{ fontSize: 20, marginBottom: 4 }}>NBA-malli — automaattinen data</h1>
-      <a href="/players" style={{ color: "#60a5fa", fontSize: 13, textDecoration: "underline" }}>
-        Pelaajat / rosterit →
-      </a>
-      <br />
-      <a href="/transactions" style={{ color: "#60a5fa", fontSize: 13, textDecoration: "underline" }}>
-        Transaktiot / treidit →
-      </a>
-      <br />
-      <a href="/matchup" style={{ color: "#60a5fa", fontSize: 13, textDecoration: "underline" }}>
-        Matchup-laskuri →
-      </a>
       <p style={{ color: "#64748b", fontSize: 13, marginBottom: 24 }}>
         Tämä sivu lukee suoraan Supabase-tietokannasta. Jos taulukko alla on tyhjä,
         cron-tehtäviä ei ole vielä ajettu kertaakaan — ks. README kohta &quot;Ensimmäinen ajo&quot;.
