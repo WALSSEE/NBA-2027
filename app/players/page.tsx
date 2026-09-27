@@ -10,6 +10,7 @@ import {
   type LeaguePlayer,
 } from "@/lib/parsePlayers";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
+import { parseBrefTotals, computeOffseason, PREV_SEASON, type PrevRow } from "@/lib/prevSeason";
 
 type DbPlayer = ParsedPlayer & { id: string; updated_at: string };
 
@@ -19,43 +20,77 @@ const LEAGUE_ACCUMULATOR_KEY = "epm_league_accumulator_v1";
 export default function PlayersPage() {
   const [tab, setTab] = useState<"excel" | "site" | "league" | "manual" | "prev">("excel");
 
-  // --- Viime kauden poissaolot (gp_prev_season) ---
-  const [prevSearch, setPrevSearch] = useState("");
-  const [prevEdits, setPrevEdits] = useState<Record<string, string>>({});
+  // --- Viime kauden minuutit (prev_season_minutes) ---
+  const [prevRows, setPrevRows] = useState<PrevRow[]>([]);
+  const [prevLoaded, setPrevLoaded] = useState(false);
+  const [prevPaste, setPrevPaste] = useState("");
+  const [prevPreview, setPrevPreview] = useState<PrevRow[] | null>(null);
+  const [prevWarnings, setPrevWarnings] = useState<string[]>([]);
   const [prevStatus, setPrevStatus] = useState<string | null>(null);
-  const [prevSaving, setPrevSaving] = useState<string | null>(null);
+  const [prevBusy, setPrevBusy] = useState(false);
 
-  async function savePrevSeason(playerId: string, name: string, raw: string) {
-    const v = raw.trim() === "" ? null : Number(raw);
-    if (v !== null && !(Number.isInteger(v) && v >= 0 && v <= 82)) {
-      setPrevStatus(`Virhe: anna pelimäärä 0–82 (tai tyhjä = poista).`);
-      return;
+  async function loadPrevRows() {
+    try {
+      const res = await fetch("/api/prev-season");
+      const data = await res.json();
+      if (!res.ok) setPrevStatus(`Virhe: ${data.error ?? res.status}`);
+      setPrevRows((data.rows ?? []).map((r: any) => ({ ...r, gp: Number(r.gp) || 0, min_total: Number(r.min_total) || 0 })));
+    } catch (e: any) {
+      setPrevStatus(`Virhe: ${e?.message ?? "tuntematon virhe"}`);
+    } finally {
+      setPrevLoaded(true);
     }
-    setPrevSaving(playerId);
-    setPrevStatus(null);
+  }
+
+  async function syncPrevFromNba() {
+    setPrevBusy(true);
+    setPrevStatus("Haetaan NBA:n pelilokeja (voi kestää ~30 s)...");
     localStorage.setItem("cron_secret", secret);
     try {
-      const res = await fetch("/api/players/status", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
-        body: JSON.stringify({ playerId, gpPrevSeason: v }),
-      });
+      const res = await fetch("/api/prev-season/sync", { method: "POST", headers: { Authorization: `Bearer ${secret}` } });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setPrevStatus(`Virhe: ${data.error ?? res.status}`);
-      } else {
-        setPrevStatus(v === null ? `${name}: poistettu.` : `${name}: pelasi viime kaudella ${v}/82.`);
-        setPrevEdits((prev) => {
-          const next = { ...prev };
-          delete next[playerId];
-          return next;
-        });
-        await loadCurrent();
+      if (!res.ok) setPrevStatus(`Virhe: ${data.error ?? res.status}`);
+      else {
+        setPrevStatus(`Haettu NBA:sta: ${data.count} pelaaja–joukkue-riviä (${data.logs} pelilokiriviä).`);
+        await loadPrevRows();
       }
     } catch (e: any) {
       setPrevStatus(`Virhe: ${e?.message ?? "tuntematon virhe"}`);
     } finally {
-      setPrevSaving(null);
+      setPrevBusy(false);
+    }
+  }
+
+  function parsePrevPaste() {
+    const r = parseBrefTotals(prevPaste);
+    setPrevPreview(r.rows);
+    setPrevWarnings(r.warnings);
+    setPrevStatus(null);
+  }
+
+  async function savePrevPreview() {
+    if (!prevPreview || prevPreview.length === 0) return;
+    setPrevBusy(true);
+    setPrevStatus(null);
+    localStorage.setItem("cron_secret", secret);
+    try {
+      const res = await fetch("/api/prev-season", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+        body: JSON.stringify({ rows: prevPreview }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) setPrevStatus(`Virhe: ${data.error ?? res.status}`);
+      else {
+        setPrevStatus(`Tallennettu ${data.count} riviä.`);
+        setPrevPreview(null);
+        setPrevPaste("");
+        await loadPrevRows();
+      }
+    } catch (e: any) {
+      setPrevStatus(`Virhe: ${e?.message ?? "tuntematon virhe"}`);
+    } finally {
+      setPrevBusy(false);
     }
   }
 
@@ -135,6 +170,7 @@ export default function PlayersPage() {
     const savedSecret = localStorage.getItem("cron_secret") ?? "";
     setSecret(savedSecret);
     loadCurrent();
+    loadPrevRows();
     try {
       const saved = localStorage.getItem(LEAGUE_ACCUMULATOR_KEY);
       if (saved) setLeagueAcc(JSON.parse(saved));
@@ -270,6 +306,36 @@ export default function PlayersPage() {
     setManStatus(null);
     localStorage.setItem("cron_secret", secret);
     try {
+      if (!manExisting) {
+        // Uusi pelaaja (esim. tulokas): luodaan ja kirjataan tulo joukkueen
+        // lukuihin transaktiona, muuten hänen vaikutuksensa ei näy mallissa.
+        const headers = { "Content-Type": "application/json", Authorization: `Bearer ${secret}` };
+        const cr = await fetch("/api/players/create", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ team: manTeam, name: manName.trim(), pos: manPos.trim(), oepm: manO, depm: manD, active: manActive }),
+        });
+        const cd = await cr.json().catch(() => ({}));
+        if (!cr.ok || !cd.player?.id) {
+          setManStatus(`Virhe: ${cd.error ?? cr.status}`);
+          return;
+        }
+        const tr = await fetch("/api/transactions", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ playerId: cd.player.id, newTeam: manTeam, newMpg: manActive ? manMpg : 0, arrival: true }),
+        });
+        const td = await tr.json().catch(() => ({}));
+        if (!tr.ok) {
+          setManStatus(`Pelaaja luotu, mutta tulon kirjaus epäonnistui: ${td.error ?? tr.status}`);
+        } else {
+          setManStatus(`Lisätty: ${manName.trim()} (${manTeam}), vaikutus kirjattu joukkueen lukuihin.`);
+          setManName("");
+          setManPos("");
+        }
+        await loadCurrent();
+        return;
+      }
       const res = await fetch("/api/players/import", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
@@ -457,104 +523,148 @@ export default function PlayersPage() {
             cursor: "pointer",
           }}
         >
-          Viime kauden poissaolot
+          Viime kauden minuutit
         </button>
       </div>
 
-      {tab === "prev" && (
-        <div style={{ maxWidth: 720, marginBottom: 32 }}>
-          <p style={{ color: "#64748b", fontSize: 13, marginBottom: 12 }}>
-            Joukkueen 25-26-luvut on laskettu peleistä, joissa pitkään poissa olleet pelaajat puuttuivat. Kirjaa tähän,
-            montako peliä pelaaja pelasi viime kaudella <strong>samalle joukkueelle</strong> (0 = koko kausi poissa). Matchup lisää
-            hänen vaikutuksensa takaisin siltä osin kuin se puuttuu joukkueen luvuista, ja lisäys hiipuu tämän kauden pelien myötä.
-            Älä kirjaa pelaajille, jotka tulivat joukkueeseen treidillä tai vapaana agenttina — heidät on jo lisätty
-            Transaktioissa.
-          </p>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-            <input
-              value={prevSearch}
-              onChange={(e) => setPrevSearch(e.target.value)}
-              placeholder="Hae pelaaja nimellä..."
-              style={{ background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "8px 10px", fontSize: 13, width: 280 }}
-            />
-            <input
-              type="password"
-              value={secret}
-              onChange={(e) => setSecret(e.target.value)}
-              placeholder="CRON_SECRET"
-              style={{ background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "6px 8px", fontSize: 12, width: 160 }}
-            />
-          </div>
-          {prevStatus && (
-            <div style={{ fontSize: 12, marginBottom: 10, color: prevStatus.startsWith("Virhe") ? "#f87171" : "#4ade80" }}>{prevStatus}</div>
-          )}
-          {(() => {
-            const q = prevSearch.trim().toLowerCase();
-            const set = current.filter((p: any) => p.gp_prev_season != null);
-            const found = q ? current.filter((p) => p.name.toLowerCase().includes(q)).slice(0, 15) : [];
-            const rows = [...found, ...set.filter((p) => !found.some((f) => f.id === p.id))];
-            if (rows.length === 0) {
-              return <div style={{ fontSize: 12, color: "#64748b" }}>Hae pelaaja. Kirjatut pelaajat näkyvät tässä listana.</div>;
-            }
-            return (
-              <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+      {tab === "prev" && (() => {
+        const off = computeOffseason(current as any, prevPreview ?? prevRows);
+        const teamsSorted = Object.values(off)
+          .filter((t) => t.prevMin > 0 || t.roleMin > 0)
+          .sort((x, y) => y.offO + y.offD - (x.offO + x.offD));
+        const unmatchedAll = teamsSorted.flatMap((t) => t.unmatched.map((u) => ({ ...u, team: t.team })));
+        const inputCss = { background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, fontSize: 12 };
+        const signed = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(2)}`;
+        return (
+          <div style={{ maxWidth: 980, marginBottom: 32 }}>
+            <p style={{ color: "#64748b", fontSize: 13, marginBottom: 12, maxWidth: 820 }}>
+              Joukkueen 25-26-luvut koostuvat pelaajien osuuksista joukkueen kaikista peleistä: <strong>vaikutusminuutit =
+              kokonaisminuutit / 82</strong> (summa ≈ 240 per joukkue). Matchup laskee kesän muutoksen: nykyisen rosterin
+              oletusminuutit × EPM miinus viime kauden vaikutusminuutit × EPM. Näin palaavat loukkaantuneet, lähtijät, tulijat ja
+              kesken kauden treidatut menevät oikein ilman siirtolokia.
+            </p>
+
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+              <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="CRON_SECRET" style={{ ...inputCss, padding: "6px 8px", width: 160 }} />
+              <button
+                onClick={syncPrevFromNba}
+                disabled={prevBusy || !secret}
+                style={{ background: prevBusy || !secret ? "#334155" : "#2563eb", color: "white", border: "none", borderRadius: 6, padding: "7px 14px", fontSize: 13, cursor: prevBusy || !secret ? "not-allowed" : "pointer" }}
+              >
+                Hae NBA:sta ({PREV_SEASON})
+              </button>
+              <span style={{ fontSize: 12, color: "#64748b" }}>
+                Kannassa {prevRows.length} riviä{prevLoaded ? "" : " (ladataan...)"}
+              </span>
+            </div>
+            {prevStatus && (
+              <div style={{ fontSize: 12, marginBottom: 10, color: prevStatus.startsWith("Virhe") ? "#f87171" : "#4ade80" }}>{prevStatus}</div>
+            )}
+
+            <details style={{ marginBottom: 16 }}>
+              <summary style={{ cursor: "pointer", fontSize: 13, color: "#94a3b8" }}>
+                Vaihtoehto: liitä Basketball-Referencen Totals-taulukko
+              </summary>
+              <div style={{ fontSize: 12, color: "#64748b", margin: "8px 0" }}>
+                basketball-reference.com → NBA 2025-26 → Per Game -valikosta <strong>Totals</strong>. Kopioi koko taulukko (tai
+                &quot;Share &amp; Export → Get table as CSV&quot;) ja liitä tähän. Treidatuilla on oma rivi jokaiselle joukkueelle.
+              </div>
+              <textarea
+                value={prevPaste}
+                onChange={(e) => setPrevPaste(e.target.value)}
+                placeholder={"Rk\tPlayer\tAge\tTeam\tPos\tG\tGS\tMP\t..."}
+                style={{ ...inputCss, width: "100%", height: 120, padding: 8, fontFamily: "monospace" }}
+              />
+              <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                <button onClick={parsePrevPaste} disabled={!prevPaste.trim()} style={{ ...inputCss, padding: "6px 12px", cursor: "pointer" }}>
+                  Tunnista
+                </button>
+                {prevPreview && (
+                  <button
+                    onClick={savePrevPreview}
+                    disabled={prevBusy || !secret || prevPreview.length === 0}
+                    style={{ background: "#2563eb", color: "white", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer" }}
+                  >
+                    Tallenna {prevPreview.length} riviä (korvaa kannan rivit)
+                  </button>
+                )}
+                {prevPreview && (
+                  <button onClick={() => setPrevPreview(null)} style={{ ...inputCss, padding: "6px 12px", cursor: "pointer" }}>
+                    Peru esikatselu
+                  </button>
+                )}
+              </div>
+              {prevWarnings.length > 0 && (
+                <ul style={{ fontSize: 12, color: "#fbbf24", margin: "8px 0", paddingLeft: 18 }}>
+                  {prevWarnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              )}
+            </details>
+
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+              Kesän muutos joukkueittain {prevPreview ? "(esikatselu, ei vielä tallennettu)" : ""}
+            </div>
+            {teamsSorted.length === 0 ? (
+              <div style={{ fontSize: 12, color: "#64748b" }}>Ei dataa vielä — hae NBA:sta tai liitä taulukko.</div>
+            ) : (
+              <table style={{ borderCollapse: "collapse", fontSize: 12, marginBottom: 16 }}>
                 <thead>
                   <tr style={{ color: "#94a3b8", textAlign: "left" }}>
-                    <th style={{ padding: 4 }}>Pelaaja</th>
-                    <th style={{ padding: 4 }}>Joukkue</th>
-                    <th style={{ padding: 4 }}>O/D</th>
-                    <th style={{ padding: 4 }}>Pelasi viime kaudella</th>
-                    <th style={{ padding: 4 }}></th>
+                    {["Joukkue", "Viime kausi (vaikutusmin)", "Rosteri nyt (oletusmin)", "Kesän muutos O", "D", "Net", "EPM puuttuu"].map((h) => (
+                      <th key={h} style={{ padding: "4px 8px" }}>
+                        {h}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((p: any) => {
-                    const val = prevEdits[p.id] ?? (p.gp_prev_season == null ? "" : String(p.gp_prev_season));
+                  {teamsSorted.map((t) => {
+                    const net = t.offO + t.offD;
+                    const minOk = Math.abs(t.roleMin - 240) <= 10;
                     return (
-                      <tr key={p.id} style={{ borderTop: "1px solid #1e293b" }}>
-                        <td style={{ padding: 4 }}>{p.name}</td>
-                        <td style={{ padding: 4, color: "#94a3b8" }}>{p.team}</td>
-                        <td style={{ padding: 4, color: "#94a3b8" }}>
-                          {p.oepm}/{p.depm}
-                        </td>
-                        <td style={{ padding: 4 }}>
-                          <input
-                            type="number"
-                            min={0}
-                            max={82}
-                            value={val}
-                            placeholder="—"
-                            onChange={(e) => setPrevEdits((prev) => ({ ...prev, [p.id]: e.target.value }))}
-                            style={{ width: 56, background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, padding: "3px 6px", fontSize: 12 }}
-                          />{" "}
-                          <span style={{ color: "#64748b" }}>/ 82</span>
-                        </td>
-                        <td style={{ padding: 4 }}>
-                          <button
-                            onClick={() => savePrevSeason(p.id, p.name, val)}
-                            disabled={!secret || prevSaving === p.id}
-                            style={{
-                              background: !secret || prevSaving === p.id ? "#334155" : "#2563eb",
-                              color: "white",
-                              border: "none",
-                              borderRadius: 4,
-                              padding: "4px 10px",
-                              fontSize: 11,
-                              cursor: !secret ? "not-allowed" : "pointer",
-                            }}
-                          >
-                            {prevSaving === p.id ? "..." : "Tallenna"}
-                          </button>
-                        </td>
+                      <tr key={t.team} style={{ borderTop: "1px solid #1e293b" }}>
+                        <td style={{ padding: "4px 8px" }}>{t.team}</td>
+                        <td style={{ padding: "4px 8px", color: Math.abs(t.prevMin - 240) <= 8 ? "#94a3b8" : "#fbbf24" }}>{t.prevMin.toFixed(0)}</td>
+                        <td style={{ padding: "4px 8px", color: minOk ? "#94a3b8" : "#fbbf24" }}>{t.roleMin.toFixed(0)}</td>
+                        <td style={{ padding: "4px 8px" }}>{signed(t.offO)}</td>
+                        <td style={{ padding: "4px 8px" }}>{signed(t.offD)}</td>
+                        <td style={{ padding: "4px 8px", fontWeight: 700, color: net >= 0 ? "#4ade80" : "#f87171" }}>{signed(net)}</td>
+                        <td style={{ padding: "4px 8px", color: t.unmatched.length ? "#fbbf24" : "#475569" }}>{t.unmatched.length || "—"}</td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
-            );
-          })()}
-        </div>
-      )}
+            )}
+            <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>
+              Keltainen rosterin minuuttisumma = oletusminuutit eivät ole n. 240 — korjaa Transactions-näkymässä, muuten kesän
+              muutos vääristyy. Net = O + D (pistettä / 100 possessiota).
+            </div>
+
+            {unmatchedAll.length > 0 && (
+              <div style={{ border: "1px solid #334155", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 13, marginBottom: 4 }}>Viime kauden pelaajat, joiden EPM puuttuu kannasta ({unmatchedAll.length})</div>
+                <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8 }}>
+                  Näiden osuus lasketaan liigan keskitasona (EPM 0). Jos listalla on merkittävä pelaaja (lopettanut, lähtenyt
+                  ulkomaille), lisää hänet Lisää pelaaja -välilehdellä joukkueeseen &quot;Free Agent&quot; oikeilla EPM-luvuilla.
+                  Nimeltään kannasta eroavat pelaajat näkyvät myös tässä.
+                </div>
+                <div style={{ fontSize: 12, columns: "3 220px" }}>
+                  {unmatchedAll
+                    .sort((x, y) => y.effMin - x.effMin)
+                    .map((u) => (
+                      <div key={u.team + u.name}>
+                        {u.name} <span style={{ color: "#64748b" }}>({u.team.split(" ").pop()}, {u.effMin.toFixed(1)} min)</span>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {tab === "manual" && (
         <div style={{ maxWidth: 520, marginBottom: 32 }}>
@@ -580,6 +690,7 @@ export default function PlayersPage() {
                 onChange={(e) => setManTeam(e.target.value)}
                 style={{ width: "100%", background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "8px 10px", fontSize: 13 }}
               >
+                <option value="Free Agent">Free Agent (ei joukkuetta)</option>
                 {ALL_TEAMS.map((t) => (
                   <option key={t} value={t}>
                     {t}

@@ -254,6 +254,7 @@ export default function TransactionsPage() {
             onSaved={async () => {
               await Promise.all([loadPlayers(), loadTransactions()]);
             }}
+            txPlayerNames={new Set(transactions.map((t) => `${t.player_name}::${t.team}`))}
           />
         </div>
       )}

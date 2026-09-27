@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { headshotUrl, initials, lastName, teamLogoUrl } from "@/lib/nbaAssets";
 import { fairOdds, gameProbabilities, pct } from "@/lib/probability";
+import { computeOffseason, type PrevRow } from "@/lib/prevSeason";
 
 type TeamStats = {
   id: string;
@@ -240,6 +241,8 @@ export default function MatchupPage() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [games, setGames] = useState<Game[]>([]);
   const [players, setPlayers] = useState<DbPlayer[]>([]);
+  // Viime kauden minuutit (prev_season_minutes). Tyhjä -> vanha siirtolokilaskenta.
+  const [prevRows, setPrevRows] = useState<PrevRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -359,6 +362,12 @@ export default function MatchupPage() {
             gp_prev_season: p.gp_prev_season == null ? null : Number(p.gp_prev_season),
           }))
         );
+        try {
+          const pr = await fetch("/api/prev-season").then((r) => r.json());
+          setPrevRows((pr.rows ?? []).map((r: any) => ({ ...r, gp: Number(r.gp) || 0, min_total: Number(r.min_total) || 0 })));
+        } catch {
+          setPrevRows([]);
+        }
         if (t.length > 0) {
           setHomeTeam(t[0].team);
           setAwayTeam(t[1]?.team ?? t[0].team);
@@ -384,6 +393,12 @@ export default function MatchupPage() {
   }, [games]);
 
   // Treidin delta vaimenee samaa tahtia kuin EWMA oppii saman asian peleistä.
+  const usePrev = prevRows.length > 0;
+  const offseason = useMemo(() => (usePrev ? computeOffseason(players, prevRows) : {}), [usePrev, players, prevRows]);
+  // Kauden ensimmäinen ottelupäivä otteluohjelmasta. Sitä ennen kirjatut siirrot
+  // ovat kesän siirtoja, jotka sisältyvät jo rosteripohjaiseen kesän muutokseen.
+  const seasonStart = useMemo(() => games.reduce((m, g) => (g.date && g.date < m ? g.date : m), "9999-12-31"), [games]);
+
   function transactionNetFor(team: string) {
     const teamGames = gamesByTeam[team] ?? [];
     let o = 0;
@@ -411,7 +426,9 @@ export default function MatchupPage() {
   function absenceOf(p: DbPlayer): AbsenceInfo {
     const t = teams.find((x) => x.team === p.team);
     const wEff = t?.coach_change ? 1 : blendWeight / 100;
-    const prevShare = p.gp_prev_season == null ? 0 : Math.min(1, Math.max(0, 1 - p.gp_prev_season / 82));
+    // Uudessa rakenteessa viime kauden poissaolot sisältyvät kesän muutokseen
+    // (vaikutusminuutit), joten gp_prev_season käytetään vain vanhassa tilassa.
+    const prevShare = usePrev || p.gp_prev_season == null ? 0 : Math.min(1, Math.max(0, 1 - p.gp_prev_season / 82));
     const inStint = (d: string) => !!p.out_since && d >= p.out_since && (!p.out_until || d < p.out_until);
     let e = wEff * prevShare;
     let missed = 0;
@@ -475,11 +492,34 @@ export default function MatchupPage() {
     const paceBlend = mix(team.pace_2526, team.pace_2425);
 
     const played = gamesByTeam[team.team] ?? [];
-    const ortgActual = ewma(ortgBlend, played.map((g) => g.ortg), alpha);
-    const drtgActual = ewma(drtgBlend, played.map((g) => g.drtg), alpha);
+
+    // Kesän muutos (rosteri nyt vs. viime kauden vaikutusminuutit) lisätään
+    // lähtötasoon ennen EWMA:a, joten se hiipuu pelien myötä samaa tahtia kuin
+    // viime kauden luvut.
+    const off = usePrev ? offseason[team.team] : undefined;
+    const offO = off?.offO ?? 0;
+    const offD = off?.offD ?? 0;
+    const ortgActual = ewma(ortgBlend + offO, played.map((g) => g.ortg), alpha);
+    const drtgActual = ewma(drtgBlend - offD, played.map((g) => g.drtg), alpha);
     const paceActual = ewma(paceBlend, played.map((g) => g.pace), alpha);
 
-    const net = transactionNetFor(team.team);
+    // Siirrot:
+    //  - vanha tila (ei viime kauden minuutteja): kaikki siirrot, vaimennus pelien mukaan
+    //  - uusi tila: vain kauden aikaiset siirrot. Ne ovat jo nykyisessä
+    //    rosterissa (eli lähtötasossa painolla (1−α)^kaikki pelit), joten
+    //    lisätään erotus niin, että paino on (1−α)^(pelit siirron jälkeen).
+    let net = { o: 0, d: 0 };
+    if (!usePrev) net = transactionNetFor(team.team);
+    else {
+      const before = played.filter((g) => g.date < refDate);
+      const wAll = Math.pow(1 - alpha, before.length);
+      for (const tx of transactions) {
+        if (tx.team !== team.team || tx.date < seasonStart) continue;
+        const wSince = Math.pow(1 - alpha, before.filter((g) => g.date >= tx.date).length);
+        net.o += (Number(tx.delta_o) || 0) * (wSince - wAll);
+        net.d += (Number(tx.delta_d) || 0) * (wSince - wAll);
+      }
+    }
     const modelOrtg = ortgActual + net.o;
     const modelDrtg = drtgActual - net.d;
 
@@ -488,6 +528,9 @@ export default function MatchupPage() {
       ortgBlend,
       drtgBlend,
       gamesPlayed: played.length,
+      offO,
+      offD,
+      offUnmatched: off?.unmatched.length ?? 0,
       ortgActual,
       drtgActual,
       paceActual,
@@ -1039,6 +1082,12 @@ export default function MatchupPage() {
       )}
 
       {statusMsg && <div style={{ color: "#f87171", fontSize: 13, marginBottom: 12 }}>{statusMsg}</div>}
+      {!usePrev && !loading && (
+        <div style={{ color: "#fbbf24", fontSize: 12, marginBottom: 12 }}>
+          Viime kauden minuutteja ei ole vielä haettu — kesän muutokset lasketaan vanhalla tavalla siirtolokista. Hae ne Players →
+          Viime kauden minuutit.
+        </div>
+      )}
 
       {missingPhotos > 0 && (
         <div style={{ fontSize: 12, color: "#64748b", marginBottom: 12 }}>
@@ -1116,7 +1165,7 @@ export default function MatchupPage() {
             <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ color: "#94a3b8", textAlign: "left" }}>
-                  {["Joukkue", "Kausiblendi O/D", "Pelattu", "EWMA O/D", "Treidit O/D", "Kokoonpano O/D", "Final ORTG", "Final DRTG", "Pace", "HCA"].map((h) => (
+                  {["Joukkue", "Kausiblendi O/D", "Kesän muutos O/D", "Pelattu", "EWMA O/D", usePrev ? "Kauden siirrot O/D" : "Siirrot O/D", "Kokoonpano O/D", "Final ORTG", "Final DRTG", "Pace", "HCA"].map((h) => (
                     <th key={h} style={{ padding: 6 }}>
                       {h}
                     </th>
@@ -1132,6 +1181,10 @@ export default function MatchupPage() {
                     <td style={{ padding: 6 }}>{t.team}</td>
                     <td style={{ padding: 6, color: "#64748b" }}>
                       {f.ortgBlend.toFixed(1)} / {f.drtgBlend.toFixed(1)}
+                    </td>
+                    <td style={{ padding: 6 }}>
+                      {usePrev ? `${signed(f.offO, 2)} / ${signed(f.offD, 2)}` : "—"}
+                      {f.offUnmatched > 0 && <span style={{ color: "#fbbf24" }}> ({f.offUnmatched} EPM puuttuu)</span>}
                     </td>
                     <td style={{ padding: 6 }}>{f.gamesPlayed}</td>
                     <td style={{ padding: 6 }}>
@@ -1153,7 +1206,10 @@ export default function MatchupPage() {
             </table>
           </div>
           <div style={{ fontSize: 11, color: "#64748b", maxWidth: 760, marginTop: 10, lineHeight: 1.6 }}>
-            Final ORTG = EWMA ORTG + treidien O-delta (vaimennettu (1−α)^pelit treidin jälkeen) + kokoonpanon O-delta. Final DRTG =
+            {usePrev
+              ? "Kesän muutos = Σ nykyinen rosteri (EPM × oletusmin / 48) − Σ viime kauden pelaajat (EPM × (kokonaisminuutit / 82) / 48). Se lisätään lähtötasoon ennen EWMA:a, joten se hiipuu pelien myötä. Kauden aikaiset siirrot painotetaan (1−α)^(pelit siirron jälkeen). "
+              : "Viime kauden minuutteja ei ole haettu (Players → Viime kauden minuutit), joten käytetään siirtolokia: "}
+            Final ORTG = EWMA ORTG + siirtojen O-delta + kokoonpanon O-delta. Final DRTG =
             EWMA DRTG − treidien D-delta − kokoonpanon D-delta. Kokoonpanon delta = raaka EPM × (tämän ottelun min − oletus min) / 48:
             poissa oleva pelaaja jonka minuutteja ei jaeta muille korvautuu siis liigan keskitason (0 EPM) pelaajalla. Tuplalaskennan
             korjaus: poissaolon vaikutus × (1−α)^(pelit jotka pelaaja on jo ollut poissa), koska EWMA on jo oppinut ne pelit; muiden

@@ -79,3 +79,15 @@ create trigger trg_team_stats_updated before update on team_stats
 drop trigger if exists trg_schedule_updated on schedule;
 create trigger trg_schedule_updated before update on schedule
   for each row execute function set_updated_at();
+
+create table if not exists prev_season_minutes (
+  id uuid primary key default gen_random_uuid(),
+  season text not null,
+  team text not null,
+  name text not null,
+  nba_id bigint,
+  gp int not null default 0,
+  min_total numeric not null default 0,
+  updated_at timestamptz default now(),
+  unique (season, team, name)
+);

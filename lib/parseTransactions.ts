@@ -19,20 +19,36 @@ export type ParsedMove = {
   otherTeam: string | null;
   otherTeamRaw: string | null;
   line: string;
+  // Joukkue, jonka otsikon alla rivi oli (esim. "Atlanta Hawks"). null, jos
+  // liitteessä ei ollut joukkueotsikkoa ennen riviä.
+  team: string | null;
 };
 
 const VERB_RE =
   /^(.+?)\s+(joins|departs|agrees|re-signs|resigns|signs|is\s|was\s|waived|released|retires|claimed|acquired|traded|exercises|declines|picks up|converts|agreed)\b/i;
 
-export function parseTeamTransactions(raw: string): { moves: ParsedMove[]; skipped: string[] } {
+export function parseTeamTransactions(raw: string): { moves: ParsedMove[]; skipped: string[]; teams: string[] } {
   const moves: ParsedMove[] = [];
   const skipped: string[] = [];
+  const teams: string[] = [];
   let section: ParsedMove["kind"] | null = null;
+  let currentTeam: string | null = null;
 
   for (const rawLine of raw.split(/\r?\n/)) {
     const line = rawLine.replace(/^[\s•\-*·]+/, "").trim();
     if (!line) continue;
     const lower = line.toLowerCase();
+
+    // Joukkueotsikko ("Atlanta Hawks") aloittaa uuden joukkueen lohkon.
+    if (line.length <= 30 && !/\s(joins|departs|agrees|signs)\b/i.test(line)) {
+      const t = resolveTeamNickname(line);
+      if (t) {
+        currentTeam = t;
+        if (!teams.includes(t)) teams.push(t);
+        section = null;
+        continue;
+      }
+    }
 
     if (/^re-?signings?$/.test(lower)) {
       section = "resign";
@@ -65,10 +81,10 @@ export function parseTeamTransactions(raw: string): { moves: ParsedMove[]; skipp
     const otherTeamRaw = withMatch ? withMatch[1].trim() : null;
     const otherTeam = otherTeamRaw ? resolveTeamNickname(otherTeamRaw) : null;
 
-    moves.push({ kind, name, otherTeam, otherTeamRaw, line });
+    moves.push({ kind, name, otherTeam, otherTeamRaw, line, team: currentTeam });
   }
 
-  return { moves, skipped };
+  return { moves, skipped, teams };
 }
 
 // Nimien vertailu: pienet kirjaimet, aksentit pois (Jokić -> jokic), pisteet ja

@@ -23,6 +23,9 @@ export async function POST(request: Request) {
   const playerId = body?.playerId ? String(body.playerId) : null;
   const newTeam = body?.newTeam ? String(body.newTeam).trim() : null;
   const newMpg = typeof body?.newMpg === "number" ? body.newMpg : null;
+  // arrival = pelaaja tulee joukkueeseen "tyhjästä" (tulokas, liigan ulkopuolelta):
+  // kirjataan vain tulo-rivi, ei lähtö-riviä vanhalle joukkueelle.
+  const arrival = body?.arrival === true;
 
   if (!playerId || !newTeam || newMpg === null) {
     return NextResponse.json({ error: "playerId, newTeam ja newMpg vaaditaan." }, { status: 400 });
@@ -54,7 +57,9 @@ export async function POST(request: Request) {
   // yhdessä (ks. DELETE alla).
   const now = new Date().toISOString();
   const rows = [
-    { player_name: player.name, team: oldTeam, direction: "out", delta_o: deltaOutO, delta_d: deltaOutD, created_at: now },
+    ...(arrival
+      ? []
+      : [{ player_name: player.name, team: oldTeam, direction: "out", delta_o: deltaOutO, delta_d: deltaOutD, created_at: now }]),
     { player_name: player.name, team: newTeam, direction: "in", delta_o: deltaInO, delta_d: deltaInD, created_at: now },
   ];
 
@@ -81,7 +86,7 @@ export async function POST(request: Request) {
     newTeam,
     oldMpg,
     newMpg,
-    deltaOut: { o: deltaOutO, d: deltaOutD },
+    deltaOut: arrival ? { o: 0, d: 0 } : { o: deltaOutO, d: deltaOutD },
     deltaIn: { o: deltaInO, d: deltaInD },
   });
 }
