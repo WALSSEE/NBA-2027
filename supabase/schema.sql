@@ -11,6 +11,9 @@ create table if not exists players (
   depm numeric default 0,
   nba_id bigint,
   active boolean default true,
+  out_since date,
+  out_until date,
+  gp_prev_season int,
   updated_at timestamptz default now()
 );
 

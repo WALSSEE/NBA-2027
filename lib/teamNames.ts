@@ -35,6 +35,29 @@ export const TEAM_NAME_BY_ABBR: Record<string, string> = {
   WAS: "Washington Wizards",
 };
 
+// Lempinimi -> täysi nimi (transaktiosivujen "via trade with Thunder" jne.).
+const EXTRA_NICKNAMES: Record<string, string> = {
+  wolves: "Minnesota Timberwolves",
+  blazers: "Portland Trail Blazers",
+  sixers: "Philadelphia 76ers",
+  mavs: "Dallas Mavericks",
+  cavs: "Cleveland Cavaliers",
+  "la clippers": "Los Angeles Clippers",
+};
+
+export function resolveTeamNickname(raw: string): string | null {
+  const s = raw.trim().toLowerCase().replace(/^the\s+/, "");
+  if (!s) return null;
+  if (EXTRA_NICKNAMES[s]) return EXTRA_NICKNAMES[s];
+  for (const full of Object.values(TEAM_NAME_BY_ABBR)) {
+    const f = full.toLowerCase();
+    if (f === s || f.endsWith(" " + s) || f.startsWith(s + " ")) return full;
+  }
+  const abbr = raw.trim().toUpperCase();
+  if (TEAM_NAME_BY_ABBR[abbr]) return TEAM_NAME_BY_ABBR[abbr];
+  return null;
+}
+
 export function normalizeTeamName(abbr: string): string {
   return TEAM_NAME_BY_ABBR[abbr] ?? abbr;
 }

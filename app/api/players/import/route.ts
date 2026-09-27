@@ -16,9 +16,9 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => null);
   const players = body?.players;
   // mode "replace" (oletus): pyyhkii KOKO players-taulun ja korvaa sen.
-  // mode "team": pyyhkii ja korvaa vain yhden joukkueen rivit (body.team),
-  // muut joukkueet säilyvät koskemattomina. Tätä käytetään kun päivität
-  // EPM-sivustolta joukkue kerrallaan.
+  // mode "team": päivittää yhden joukkueen (body.team) liitetyt pelaajat
+  // upsertilla; liitteestä puuttuvat pelaajat säilyvät, ellei niitä ole
+  // nimetty body.removeNames-listassa. Käytetään EPM-sivun joukkuetuonnissa.
   // mode "merge": upsert (team,name) -avaimella, EI poista mitään. Tätä
   // käytetään "koko liiga" -tuonnissa, kun dataa liitetään useassa
   // pätkässä eri istunnoissa — vaatii players_team_name_unique-rajoitteen
@@ -41,6 +41,37 @@ export async function POST(request: Request) {
   }
 
   const supabase = getSupabaseAdmin();
+
+  if (mode === "team") {
+    // Joukkueen päivitys EPM-sivulta: upsert liitetyille pelaajille, EI poista
+    // automaattisesti niitä joita liitteessä ei ole (esim. käsin lisätyt
+    // tulokkaat, joita ei vielä ole EPM-sivulla). Poistetaan vain ne nimet,
+    // jotka käyttäjä on erikseen valinnut (body.removeNames).
+    const rows = players.map((p: any) => ({
+      team,
+      name: p.name,
+      pos: p.pos ?? "",
+      mpg_base: p.mpg_base ?? 0,
+      oepm: p.oepm ?? 0,
+      depm: p.depm ?? 0,
+      active: p.active ?? true,
+    }));
+    const { error: upsertError } = await supabase.from("players").upsert(rows, { onConflict: "team,name" });
+    if (upsertError) {
+      return NextResponse.json({ error: `Tallennus epäonnistui: ${upsertError.message}` }, { status: 500 });
+    }
+    const removeNames: string[] = Array.isArray(body?.removeNames) ? body.removeNames.map(String) : [];
+    if (removeNames.length > 0) {
+      const { error: delError } = await supabase.from("players").delete().eq("team", team).in("name", removeNames);
+      if (delError) {
+        return NextResponse.json(
+          { error: `Pelaajat päivitetty, mutta poisto epäonnistui: ${delError.message}` },
+          { status: 500 }
+        );
+      }
+    }
+    return NextResponse.json({ ok: true, count: rows.length, removed: removeNames.length });
+  }
 
   if (mode === "merge") {
     const rows = players.map((p: any) => ({
@@ -72,31 +103,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, count: upserted });
   }
 
-  if (mode === "team") {
-    // Poistetaan vain tämän yhden joukkueen vanhat rivit, muut joukkueet
-    // säilyvät ennallaan.
-    const { error: deleteTeamError } = await supabase.from("players").delete().eq("team", team);
-    if (deleteTeamError) {
-      return NextResponse.json(
-        { error: `Joukkueen ${team} vanhan datan poisto epäonnistui: ${deleteTeamError.message}` },
-        { status: 500 }
-      );
-    }
-  } else {
-    // Koko roster korvataan kerralla (käyttäjä poistelee/siirtelee pelaajia
-    // Excelissä/liitetyssä datassa, ei tässä sovelluksessa rivi kerrallaan).
-    const { error: deleteError } = await supabase
-      .from("players")
-      .delete()
-      .not("id", "is", null);
-
-    if (deleteError) {
-      return NextResponse.json({ error: `Vanhan datan poisto epäonnistui: ${deleteError.message}` }, { status: 500 });
-    }
+  // mode "replace": koko roster korvataan kerralla.
+  const { error: deleteError } = await supabase.from("players").delete().not("id", "is", null);
+  if (deleteError) {
+    return NextResponse.json({ error: `Vanhan datan poisto epäonnistui: ${deleteError.message}` }, { status: 500 });
   }
 
   const rows = players.map((p: any) => ({
-    team: mode === "team" ? team : p.team,
+    team: p.team,
     name: p.name,
     pos: p.pos ?? "",
     mpg_base: p.mpg_base ?? 0,

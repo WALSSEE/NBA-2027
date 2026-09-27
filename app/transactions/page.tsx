@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
+import TeamUpdate from "./TeamUpdate";
 
 type DbPlayer = {
   id: string;
@@ -34,6 +35,7 @@ export default function TransactionsPage() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loadingTx, setLoadingTx] = useState(true);
 
+  const [mode, setMode] = useState<"team" | "single">("team");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [newTeam, setNewTeam] = useState(ALL_TEAMS[0] ?? "");
@@ -220,6 +222,44 @@ export default function TransactionsPage() {
         minuutit päivittyvät samalla Pelaajat-sivulle.
       </p>
 
+      <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: "1px solid #334155" }}>
+        {[
+          { key: "team" as const, label: "Joukkue kerrallaan" },
+          { key: "single" as const, label: "Yksittäinen siirto" },
+        ].map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setMode(t.key)}
+            style={{
+              padding: "8px 16px",
+              fontSize: 13,
+              background: "transparent",
+              border: "none",
+              borderBottom: mode === t.key ? "2px solid #2563eb" : "2px solid transparent",
+              color: mode === t.key ? "#e2e8f0" : "#64748b",
+              cursor: "pointer",
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {mode === "team" && (
+        <div style={{ marginBottom: 32 }}>
+          <TeamUpdate
+            players={players}
+            secret={secret}
+            setSecret={setSecret}
+            onSaved={async () => {
+              await Promise.all([loadPlayers(), loadTransactions()]);
+            }}
+          />
+        </div>
+      )}
+
+      {mode === "single" && (
+      <>
       <div style={{ maxWidth: 480, marginBottom: 24 }}>
         <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>Etsi pelaaja</label>
         <input
@@ -471,6 +511,9 @@ export default function TransactionsPage() {
           )}
         </div>
       </div>
+
+      </>
+      )}
 
       <h2 style={{ fontSize: 16, marginTop: 32, marginBottom: 8 }}>Joukkueiden nettovaikutus transaktioista</h2>
       {loadingTx ? (
