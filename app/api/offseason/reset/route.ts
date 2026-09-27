@@ -1,18 +1,17 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { planReset } from "@/lib/resetPlan";
+import { PREV_SEASON } from "@/lib/prevSeason";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 // Aloitus alusta.
 //  mode "log":  tyhjentää transaktiolokin, rosterit ennallaan.
-//  mode "full": tyhjentää lokin JA palauttaa pelaajat alkutilanteeseen
-//               (season_start_roster = Excelin joukkueet ja minuutit):
-//   - alkutilanteen pelaaja -> hänen alkujoukkueensa, minuutit alkutilanteesta, aktiivinen
-//   - saman pelaajan tuplarivit muissa joukkueissa -> ei aktiivinen, 0 min
-//   - pelaajat, joita alkutilanteessa ei ole -> 0 min (jäävät joukkueeseensa)
-//   - alkutilanteen pelaaja, jota ei ole players-taulussa -> lisätään (Excelin EPM)
+//  mode "full": tyhjentää lokin JA palauttaa pelaajat kauden 25-26 lähtötilanteeseen
+//               (ks. lib/resetPlan.ts): joukkue = kauden viimeinen joukkue,
+//               minuutit = koko kauden minuutit / 82. Kesän muutos on silloin 0
+//               (paitsi kesken kauden treidatuilla, joiden vaikutus on todellinen).
 export async function POST(request: Request) {
   const authHeader = request.headers.get("authorization");
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -25,21 +24,21 @@ export async function POST(request: Request) {
   }
   const supabase = getSupabaseAdmin();
 
-  // Tarkistetaan alkutilanne ennen kuin mitään poistetaan.
-  let start: any[] = [];
+  // Tarkistetaan 25-26 data ennen kuin mitään poistetaan.
+  const prev: any[] = [];
   if (mode === "full") {
     for (let from = 0; ; from += 1000) {
       const { data, error } = await supabase
-        .from("season_start_roster")
-        .select("team, name, mpg, in_team, oepm, depm")
+        .from("prev_season_minutes")
+        .select("team, name, min_total, final_team")
+        .eq("season", PREV_SEASON)
         .range(from, from + 999);
-      if (error) return NextResponse.json({ error: `Alkutilannetta ei saatu haettua: ${error.message}. Aja supabase/setup_season_start.sql.` }, { status: 500 });
-      start.push(...(data ?? []));
+      if (error) return NextResponse.json({ error: `25-26 minuutteja ei saatu haettua: ${error.message}. Aja supabase/setup_season_baseline.sql.` }, { status: 500 });
+      prev.push(...(data ?? []));
       if (!data || data.length < 1000) break;
     }
-    start = start.filter((r) => r.in_team);
-    if (start.length === 0) {
-      return NextResponse.json({ error: "Alkutilanne on tyhjä — aja ensin supabase/setup_season_start.sql. Mitään ei muutettu." }, { status: 400 });
+    if (prev.length === 0) {
+      return NextResponse.json({ error: "25-26 minuutit puuttuvat — aja ensin supabase/setup_season_baseline.sql. Mitään ei muutettu." }, { status: 400 });
     }
   }
 
@@ -54,7 +53,7 @@ export async function POST(request: Request) {
     players.push(...(data ?? []));
     if (!data || data.length < 1000) break;
   }
-  const { moves, deact, inserts, others } = planReset(start, players);
+  const { moves, deact, inserts, others } = planReset(prev, players);
 
   const run = async (label: string, rows: Record<string, unknown>[], insert = false) => {
     for (let i = 0; i < rows.length; i += 200) {

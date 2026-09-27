@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { headshotUrl, initials, lastName, teamLogoUrl } from "@/lib/nbaAssets";
 import { fairOdds, gameProbabilities, pct } from "@/lib/probability";
-import { computeRosterChange, teamMinuteScale, canonTeam, type StartRow } from "@/lib/prevSeason";
+import { computeOffseason, leagueNormalize, teamMinuteScale, canonTeam, type PrevRow } from "@/lib/prevSeason";
 
 type TeamStats = {
   id: string;
@@ -242,8 +242,26 @@ export default function MatchupPage() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [games, setGames] = useState<Game[]>([]);
   const [players, setPlayers] = useState<DbPlayer[]>([]);
-  // Alkutilanne (season_start_roster = Excelin rosterit ja minuutit). Tyhjä -> vanha siirtolokilaskenta.
-  const [prevRows, setPrevRows] = useState<StartRow[]>([]);
+  // Kauden 25-26 pelatut minuutit (prev_season_minutes) = pohja, josta joukkueiden
+  // 25-26 luvut syntyivät. Tyhjä -> vanha siirtolokilaskenta.
+  const [prevRows, setPrevRows] = useState<PrevRow[]>([]);
+  // Liigatason korjaus: kesän muutosten liigakeskiarvo vähennetään (Net-summa on aina 0).
+  const [leagueNorm, setLeagueNormState] = useState(true);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("matchup_league_norm_v1") === "0") setLeagueNormState(false);
+    } catch {
+      // ei haittaa
+    }
+  }, []);
+  function setLeagueNorm(v: boolean) {
+    setLeagueNormState(v);
+    try {
+      localStorage.setItem("matchup_league_norm_v1", v ? "1" : "0");
+    } catch {
+      // ei haittaa
+    }
+  }
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -364,8 +382,8 @@ export default function MatchupPage() {
           }))
         );
         try {
-          const pr = await fetch("/api/season-start").then((r) => r.json());
-          setPrevRows((pr.rows ?? []).map((r: any) => ({ ...r, mpg: Number(r.mpg) || 0, oepm: Number(r.oepm) || 0, depm: Number(r.depm) || 0 })));
+          const pr = await fetch("/api/prev-season").then((r) => r.json());
+          setPrevRows((pr.rows ?? []).map((r: any) => ({ ...r, gp: Number(r.gp) || 0, min_total: Number(r.min_total) || 0 })));
         } catch {
           setPrevRows([]);
         }
@@ -403,7 +421,13 @@ export default function MatchupPage() {
     const k = t ? minuteScale[t] ?? 1 : 1;
     return Math.round(rawBaseMin(p) * k * 10) / 10;
   };
-  const offseason = useMemo(() => (usePrev ? computeRosterChange(players, prevRows) : {}), [usePrev, players, prevRows]);
+  const offseasonNorm = useMemo(() => {
+    if (!usePrev) return { teams: {} as ReturnType<typeof computeOffseason>, meanO: 0, meanD: 0 };
+    const raw = computeOffseason(players, prevRows);
+    const n = leagueNormalize(raw);
+    return leagueNorm ? n : { ...n, teams: raw };
+  }, [usePrev, players, prevRows, leagueNorm]);
+  const offseason = offseasonNorm.teams;
   // Kauden ensimmäinen ottelupäivä otteluohjelmasta. Sitä ennen kirjatut siirrot
   // ovat kesän siirtoja, jotka sisältyvät jo rosteripohjaiseen kesän muutokseen.
   const seasonStart = useMemo(() => games.reduce((m, g) => (g.date && g.date < m ? g.date : m), "9999-12-31"), [games]);
@@ -1093,8 +1117,8 @@ export default function MatchupPage() {
       {statusMsg && <div style={{ color: "#f87171", fontSize: 13, marginBottom: 12 }}>{statusMsg}</div>}
       {!usePrev && !loading && (
         <div style={{ color: "#fbbf24", fontSize: 12, marginBottom: 12 }}>
-          Alkutilannetta ei ole tallennettu — kesän muutokset lasketaan vanhalla tavalla siirtolokista. Aja
-          supabase/setup_season_start.sql Supabasessa.
+          Kauden 25-26 minuutteja ei ole tallennettu — kesän muutokset lasketaan vanhalla tavalla siirtolokista. Aja
+          supabase/setup_season_baseline.sql Supabasessa.
         </div>
       )}
 
@@ -1133,6 +1157,15 @@ export default function MatchupPage() {
               Pelattujen otteluiden paino (α): {alpha.toFixed(2)} (~{Math.round(1 / alpha)} pelin muisti)
             </label>
             <input type="range" min={0.05} max={0.5} step={0.01} value={alpha} onChange={(e) => setAlpha(Number(e.target.value))} style={{ width: "100%" }} />
+            <label style={{ fontSize: 12, color: "#94a3b8", display: "flex", gap: 6, alignItems: "center", marginTop: 14 }}>
+              <input type="checkbox" checked={leagueNorm} onChange={(e) => setLeagueNorm(e.target.checked)} />
+              Kesän muutos liigakeskiarvoon nähden
+            </label>
+            <div style={{ fontSize: 11, color: "#64748b" }}>
+              Joukkueiden Net-lukujen summa on aina 0, joten jos kaikki &quot;paranevat&quot;, se on mallin harha. Päällä: liigan
+              keskimääräinen muutos (nyt O {offseasonNorm.meanO >= 0 ? "+" : ""}{offseasonNorm.meanO.toFixed(2)}, D{" "}
+              {offseasonNorm.meanD >= 0 ? "+" : ""}{offseasonNorm.meanD.toFixed(2)}) vähennetään jokaiselta.
+            </div>
           </div>
           <div>
             <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>CRON_SECRET (poissaolojen tallennus)</label>
@@ -1216,8 +1249,8 @@ export default function MatchupPage() {
           </div>
           <div style={{ fontSize: 11, color: "#64748b", maxWidth: 760, marginTop: 10, lineHeight: 1.6 }}>
             {usePrev
-              ? "Kesän muutos = Σ nykyinen rosteri (EPM × oletusmin / 48) − Σ alkutilanne (Excelin rosterit ja minuutit, EPM × min / 48); molemmat skaalattu 240 minuuttiin. Alkutilanteessa muutos on tasan 0. Se lisätään lähtötasoon ennen EWMA:a, joten se hiipuu pelien myötä. Kauden aikaiset siirrot painotetaan (1−α)^(pelit siirron jälkeen). "
-              : "Alkutilannetta ei ole tallennettu (setup_season_start.sql), joten käytetään siirtolokia: "}
+              ? "Kesän muutos = Σ nykyinen rosteri (EPM × oletusmin / 48) − Σ kauden 25-26 pelaajat (EPM × (kokonaisminuutit / 82) / 48); molemmat skaalattu 240 minuuttiin" + (leagueNorm ? ` − liigakeskiarvo (O ${offseasonNorm.meanO.toFixed(2)}, D ${offseasonNorm.meanD.toFixed(2)})` : "") + ". Se lisätään lähtötasoon ennen EWMA:a, joten se hiipuu pelien myötä. Kauden aikaiset siirrot painotetaan (1−α)^(pelit siirron jälkeen). "
+              : "Kauden 25-26 minuutteja ei ole tallennettu (setup_season_baseline.sql), joten käytetään siirtolokia: "}
             Final ORTG = EWMA ORTG + siirtojen O-delta + kokoonpanon O-delta. Final DRTG =
             EWMA DRTG − treidien D-delta − kokoonpanon D-delta. Kokoonpanon delta = raaka EPM × (tämän ottelun min − oletus min) / 48:
             poissa oleva pelaaja jonka minuutteja ei jaeta muille korvautuu siis liigan keskitason (0 EPM) pelaajalla. Tuplalaskennan

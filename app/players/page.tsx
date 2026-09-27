@@ -11,7 +11,7 @@ import {
 } from "@/lib/parsePlayers";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
 import { normalizePlayerName } from "@/lib/parseTransactions";
-import { computeRosterChange, makePlayerFinder, canonTeam, type StartRow } from "@/lib/prevSeason";
+import { computeOffseason, leagueNormalize, makePlayerFinder, canonTeam, type PrevRow } from "@/lib/prevSeason";
 
 type DbPlayer = ParsedPlayer & { id: string; updated_at: string };
 
@@ -21,54 +21,22 @@ const LEAGUE_ACCUMULATOR_KEY = "epm_league_accumulator_v1";
 export default function PlayersPage() {
   const [tab, setTab] = useState<"excel" | "site" | "league" | "manual" | "prev">("excel");
 
-  // --- Alkutilanne (season_start_roster = Excelin rosterit ja minuutit) ---
-  const [prevRows, setPrevRows] = useState<StartRow[]>([]);
+  // --- Pohja: kauden 25-26 pelatut minuutit (prev_season_minutes) ---
+  const [prevRows, setPrevRows] = useState<PrevRow[]>([]);
   const [prevLoaded, setPrevLoaded] = useState(false);
   const [prevStatus, setPrevStatus] = useState<string | null>(null);
   const [prevOpenTeam, setPrevOpenTeam] = useState<string | null>(null);
-  const [startEdit, setStartEdit] = useState<Record<string, string>>({});
   async function loadPrevRows() {
     try {
-      const res = await fetch("/api/season-start");
+      const res = await fetch("/api/prev-season");
       const data = await res.json().catch(() => ({}));
       if (!res.ok) setPrevStatus(`Virhe: ${data.error ?? res.status}`);
-      setPrevRows((data.rows ?? []).map((r: any) => ({ ...r, mpg: Number(r.mpg) || 0, oepm: Number(r.oepm) || 0, depm: Number(r.depm) || 0 })));
+      setPrevRows((data.rows ?? []).map((r: any) => ({ ...r, gp: Number(r.gp) || 0, min_total: Number(r.min_total) || 0 })));
     } catch (e: any) {
       setPrevStatus(`Virhe: ${e?.message ?? "tuntematon virhe"}`);
     } finally {
       setPrevLoaded(true);
     }
-  }
-  async function saveStartMinutes(row: StartRow) {
-    const raw = startEdit[row.id!];
-    if (raw == null) return;
-    const mpg = Number(raw.replace(",", "."));
-    if (!Number.isFinite(mpg) || mpg < 0 || mpg > 48 || mpg === Number(row.mpg)) {
-      setStartEdit((e) => {
-        const n = { ...e };
-        delete n[row.id!];
-        return n;
-      });
-      return;
-    }
-    localStorage.setItem("cron_secret", secret);
-    const res = await fetch("/api/season-start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
-      body: JSON.stringify({ id: row.id, mpg }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      setPrevStatus(`Virhe: ${data.error ?? res.status}`);
-      return;
-    }
-    setPrevStatus(`Tallennettu: ${row.name} alkutilanne ${mpg} min.`);
-    setPrevRows((rows) => rows.map((r) => (r.id === row.id ? { ...r, mpg } : r)));
-    setStartEdit((e) => {
-      const n = { ...e };
-      delete n[row.id!];
-      return n;
-    });
   }
 
   // --- Käsin lisäys (esim. tulokkaat joita ei vielä ole EPM-sivulla) ---
@@ -249,7 +217,7 @@ export default function PlayersPage() {
         setSiteStatus(`Virhe: ${data.error ?? "tuntematon virhe"}`);
       } else {
         setSiteStatus(
-          `Tallennettu: ${siteTeam} päivitetty, ${data.count} pelaajaa${data.removed ? `, ${data.removed} poistettu` : ""}.`
+          `Tallennettu: ${siteTeam} — EPM päivitetty ${data.count - (data.added ?? 0)} pelaajalle (minuutit ennallaan)${data.added ? `, ${data.added} uutta lisätty 0 minuutilla` : ""}${data.removed ? `, ${data.removed} poistettu` : ""}.`
         );
         setSiteRaw("");
         setSitePreview([]);
@@ -398,7 +366,7 @@ export default function PlayersPage() {
       if (!res.ok) {
         setLeagueStatus(`Virhe: ${data.error ?? "tuntematon virhe"}`);
       } else {
-        setLeagueStatus(`Tallennettu: ${data.count} pelaajaa kirjoitettu/päivitetty tietokannassa.`);
+        setLeagueStatus(`Tallennettu: EPM päivitetty ${data.count - (data.added ?? 0)} pelaajalle (minuutit ennallaan)${data.added ? `, ${data.added} uutta lisätty 0 minuutilla` : ""}.`);
         setLeagueAcc({});
         localStorage.removeItem(LEAGUE_ACCUMULATOR_KEY);
         await loadCurrent();
@@ -500,148 +468,151 @@ export default function PlayersPage() {
             cursor: "pointer",
           }}
         >
-          Alkutilanne
+          Pohja 25-26
         </button>
       </div>
 
       {tab === "prev" && (() => {
-        const off = computeRosterChange(current as any, prevRows);
+        const raw = computeOffseason(current as any, prevRows);
+        const { teams: off, meanO, meanD } = leagueNormalize(raw);
         const teamsSorted = Object.values(off)
-          .filter((t) => t.prevMin > 0 || t.roleMin > 0)
+          .filter((t) => canonTeam(t.team) && (t.prevMin > 0 || t.roleMin > 0))
           .sort((x, y) => y.offO + y.offD - (x.offO + x.offD));
         const findNow = makePlayerFinder(current as any[]);
-        const inputCss = { background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, fontSize: 12 };
         const signed = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(2)}`;
         const cell = { padding: "2px 8px" };
+        const unmatchedAll = teamsSorted.flatMap((t) => t.unmatched.map((u) => ({ ...u, team: t.team })));
         return (
           <div style={{ maxWidth: 980, marginBottom: 32 }}>
             <p style={{ color: "#64748b", fontSize: 13, marginBottom: 12, maxWidth: 820 }}>
-              <strong>Alkutilanne</strong> = Excelisi rosterit ja minuutit. Se on se, mistä joukkueen 25-26 ORTG/DRTG koostuu, eikä
-              se itsessään muuta lukuja: kun rosteri on alkutilanteessa, muutos on 0. <strong>Muutos</strong> = nykyinen rosteri −
-              alkutilanne (EPM × minuutit / 48, molemmat skaalattu 240 minuuttiin). Vain Transactions-sivulla tekemäsi siirrot ja
-              minuuttimuutokset liikuttavat lukuja. Alkutilanteen minuutteja voi muokata avaamalla joukkueen.
+              <strong>Pohja</strong> = kuka pelasi kaudella 25-26 ja kuinka paljon, koko kauden ajalta:{" "}
+              <strong>kokonaisminuutit / 82</strong>. Juuri näillä minuuteilla joukkueen 25-26 ORTG/DRTG syntyi — myös
+              loukkaantumiset ja kesken kauden treidit ovat siinä oikeassa suhteessa. <strong>Muutos</strong> = nykyinen rosteri
+              (Transactionsin minuutit) − pohja. Kun palautat lähtötilanteen, jokaisen pelaajan minuuteiksi tulee hänen pohjansa,
+              joten muutos on 0 (paitsi kesken kauden treidatuilla). Sen jälkeen lukuja liikuttavat vain sinun muutoksesi.
             </p>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
-              <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="CRON_SECRET (muokkaukseen)" style={{ ...inputCss, padding: "6px 8px", width: 200 }} />
-              <span style={{ fontSize: 12, color: "#64748b" }}>
-                Alkutilanteessa {prevRows.filter((r) => r.in_team).length} pelaajaa{prevLoaded ? "" : " (ladataan...)"}
-              </span>
-            </div>
-            {prevStatus && (
-              <div style={{ fontSize: 12, marginBottom: 10, color: prevStatus.startsWith("Virhe") ? "#f87171" : "#4ade80" }}>{prevStatus}</div>
-            )}
+            {prevStatus && <div style={{ fontSize: 12, marginBottom: 10, color: "#f87171" }}>{prevStatus}</div>}
             {prevLoaded && prevRows.length === 0 ? (
               <div style={{ fontSize: 12, color: "#fbbf24" }}>
-                Alkutilannetta ei ole vielä tallennettu. Aja supabase/setup_season_start.sql Supabasen SQL Editorissa.
+                Kauden 25-26 minuutteja ei ole tallennettu. Aja supabase/setup_season_baseline.sql Supabasen SQL Editorissa.
               </div>
             ) : (
-              <table style={{ borderCollapse: "collapse", fontSize: 12, marginBottom: 16 }}>
-                <thead>
-                  <tr style={{ color: "#94a3b8", textAlign: "left" }}>
-                    {["Joukkue", "Alkutilanne min", "Rosteri nyt min", "Muutos O", "D", "Net"].map((h) => (
-                      <th key={h} style={{ padding: "4px 8px" }}>
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {teamsSorted.map((t) => {
-                    const net = t.offO + t.offD;
-                    const startRows = prevRows.filter((r) => r.in_team && r.team === t.team).sort((a, b) => b.mpg - a.mpg);
-                    const startNames = new Set(startRows.map((r) => normalizePlayerName(r.name)));
-                    const newcomers = current.filter(
-                      (c) => canonTeam(c.team) === t.team && c.active && c.mpg_base > 0 && !startRows.some((r) => findNow(r.name)?.id === c.id) && !startNames.has(normalizePlayerName(c.name))
-                    );
-                    return (
-                      <Fragment key={t.team}>
-                        <tr style={{ borderTop: "1px solid #1e293b" }}>
-                          <td
-                            style={{ padding: "4px 8px", cursor: "pointer", color: "#93c5fd" }}
-                            onClick={() => setPrevOpenTeam((cur) => (cur === t.team ? null : t.team))}
-                            title="Näytä alkutilanne ja nykyinen rosteri"
-                          >
-                            {prevOpenTeam === t.team ? "▾ " : "▸ "}
-                            {t.team}
-                          </td>
-                          <td style={{ padding: "4px 8px", color: "#94a3b8" }}>{t.prevMin.toFixed(0)}</td>
-                          <td style={{ padding: "4px 8px", color: "#94a3b8" }}>{t.roleMin.toFixed(0)}</td>
-                          <td style={{ padding: "4px 8px" }}>{signed(t.offO)}</td>
-                          <td style={{ padding: "4px 8px" }}>{signed(t.offD)}</td>
-                          <td style={{ padding: "4px 8px", fontWeight: 700, color: Math.abs(net) < 0.005 ? "#94a3b8" : net >= 0 ? "#4ade80" : "#f87171" }}>{signed(net)}</td>
-                        </tr>
-                        {prevOpenTeam === t.team && (
-                          <tr>
-                            <td colSpan={6} style={{ padding: "4px 8px 10px 24px" }}>
-                              <table style={{ borderCollapse: "collapse", fontSize: 11, color: "#94a3b8" }}>
-                                <thead>
-                                  <tr style={{ textAlign: "left" }}>
-                                    {["Pelaaja", "EPM O / D", "Alkutilanne min", "Nyt"].map((h) => (
-                                      <th key={h} style={cell}>
-                                        {h}
-                                      </th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {startRows.map((r) => {
-                                    const now = findNow(r.name);
-                                    const nowTeam = now ? canonTeam(now.team) : null;
-                                    const nowStr = !now
-                                      ? "ei kannassa"
-                                      : nowTeam === t.team
-                                      ? now.active
-                                        ? `${now.mpg_base} min`
-                                        : "ei aktiivinen"
-                                      : `→ ${now.team}`;
-                                    const changed = !now || nowTeam !== t.team || (now.active ? Number(now.mpg_base) : 0) !== Number(r.mpg);
-                                    const o = now ? Number(now.oepm) : Number(r.oepm);
-                                    const d = now ? Number(now.depm) : Number(r.depm);
-                                    return (
-                                      <tr key={r.id ?? r.name} style={{ borderTop: "1px solid #1e293b" }}>
-                                        <td style={{ ...cell, color: "#e2e8f0" }}>{r.name}</td>
-                                        <td style={cell}>
-                                          {o.toFixed(1)} / {d.toFixed(1)}
-                                        </td>
-                                        <td style={cell}>
-                                          <input
-                                            value={startEdit[r.id!] ?? String(r.mpg)}
-                                            onChange={(e) => setStartEdit((s) => ({ ...s, [r.id!]: e.target.value }))}
-                                            onBlur={() => saveStartMinutes(r)}
-                                            onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
-                                            disabled={!secret || !r.id}
-                                            style={{ ...inputCss, width: 52, padding: "2px 4px" }}
-                                          />
-                                        </td>
-                                        <td style={{ ...cell, color: changed ? "#fbbf24" : "#64748b" }}>{nowStr}</td>
-                                      </tr>
-                                    );
-                                  })}
-                                  {newcomers.map((c) => (
-                                    <tr key={c.id} style={{ borderTop: "1px solid #1e293b" }}>
-                                      <td style={{ ...cell, color: "#e2e8f0" }}>{c.name}</td>
-                                      <td style={cell}>
-                                        {Number(c.oepm).toFixed(1)} / {Number(c.depm).toFixed(1)}
-                                      </td>
-                                      <td style={cell}>—</td>
-                                      <td style={{ ...cell, color: "#4ade80" }}>uusi · {c.mpg_base} min</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
+              <>
+                <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 8 }}>
+                  Liigan keskimääräinen muutos (vähennetty, koska Net-summa on aina 0): O {signed(meanO)} · D {signed(meanD)}
+                </div>
+                <table style={{ borderCollapse: "collapse", fontSize: 12, marginBottom: 16 }}>
+                  <thead>
+                    <tr style={{ color: "#94a3b8", textAlign: "left" }}>
+                      {["Joukkue", "Pohja min", "Rosteri nyt min", "Muutos O", "D", "Net"].map((h) => (
+                        <th key={h} style={{ padding: "4px 8px" }}>
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {teamsSorted.map((t) => {
+                      const net = t.offO + t.offD;
+                      const rows = prevRows.filter((r) => r.team === t.team).sort((a, b) => b.min_total - a.min_total);
+                      const prevIds = new Set(rows.map((r) => findNow(r.name)?.id).filter(Boolean));
+                      const newcomers = current.filter((c) => canonTeam(c.team) === t.team && c.active && c.mpg_base > 0 && !prevIds.has(c.id));
+                      return (
+                        <Fragment key={t.team}>
+                          <tr style={{ borderTop: "1px solid #1e293b" }}>
+                            <td
+                              style={{ padding: "4px 8px", cursor: "pointer", color: "#93c5fd" }}
+                              onClick={() => setPrevOpenTeam((cur) => (cur === t.team ? null : t.team))}
+                              title="Näytä pohja ja nykyinen rosteri"
+                            >
+                              {prevOpenTeam === t.team ? "▾ " : "▸ "}
+                              {t.team}
                             </td>
+                            <td style={{ padding: "4px 8px", color: "#94a3b8" }}>{t.prevMin.toFixed(0)}</td>
+                            <td style={{ padding: "4px 8px", color: "#94a3b8" }}>{t.roleMin.toFixed(0)}</td>
+                            <td style={{ padding: "4px 8px" }}>{signed(t.offO)}</td>
+                            <td style={{ padding: "4px 8px" }}>{signed(t.offD)}</td>
+                            <td style={{ padding: "4px 8px", fontWeight: 700, color: Math.abs(net) < 0.05 ? "#94a3b8" : net >= 0 ? "#4ade80" : "#f87171" }}>{signed(net)}</td>
                           </tr>
-                        )}
-                      </Fragment>
-                    );
-                  })}
-                </tbody>
-              </table>
+                          {prevOpenTeam === t.team && (
+                            <tr>
+                              <td colSpan={6} style={{ padding: "4px 8px 10px 24px" }}>
+                                <table style={{ borderCollapse: "collapse", fontSize: 11, color: "#94a3b8" }}>
+                                  <thead>
+                                    <tr style={{ textAlign: "left" }}>
+                                      {["Pelaaja", "EPM O / D", "Pelit", "Min/peli", "Pohja (/82)", "Nyt"].map((h) => (
+                                        <th key={h} style={cell}>
+                                          {h}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {rows.map((r) => {
+                                      const now = findNow(r.name);
+                                      const nowTeam = now ? canonTeam(now.team) : null;
+                                      const nowStr = !now
+                                        ? "ei kannassa (EPM 0)"
+                                        : nowTeam === t.team
+                                        ? now.active
+                                          ? `${now.mpg_base} min`
+                                          : "ei aktiivinen"
+                                        : `→ ${now.team}${now.active ? ` ${now.mpg_base} min` : ""}`;
+                                      const eff = r.min_total / 82;
+                                      const same = now && nowTeam === t.team && now.active && Math.abs(Number(now.mpg_base) - eff) < 0.05;
+                                      return (
+                                        <tr key={r.name} style={{ borderTop: "1px solid #1e293b" }}>
+                                          <td style={{ ...cell, color: "#e2e8f0" }}>{r.name}</td>
+                                          <td style={cell}>{now ? `${Number(now.oepm).toFixed(1)} / ${Number(now.depm).toFixed(1)}` : "—"}</td>
+                                          <td style={cell}>{r.gp}</td>
+                                          <td style={cell}>{r.gp ? (r.min_total / r.gp).toFixed(1) : "—"}</td>
+                                          <td style={{ ...cell, color: "#e2e8f0" }}>{eff.toFixed(1)}</td>
+                                          <td style={{ ...cell, color: same ? "#64748b" : "#fbbf24" }}>{nowStr}</td>
+                                        </tr>
+                                      );
+                                    })}
+                                    {newcomers.map((c) => (
+                                      <tr key={c.id} style={{ borderTop: "1px solid #1e293b" }}>
+                                        <td style={{ ...cell, color: "#e2e8f0" }}>{c.name}</td>
+                                        <td style={cell}>
+                                          {Number(c.oepm).toFixed(1)} / {Number(c.depm).toFixed(1)}
+                                        </td>
+                                        <td style={cell}>—</td>
+                                        <td style={cell}>—</td>
+                                        <td style={cell}>0</td>
+                                        <td style={{ ...cell, color: "#4ade80" }}>uusi · {c.mpg_base} min</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>
+                  Keltainen = nykyinen tilanne poikkeaa pohjasta (minuutit muuttuneet, siirtynyt tai ei aktiivinen). Net = O + D
+                  (pistettä / 100 possessiota), liigakeskiarvo vähennettynä.
+                </div>
+                {unmatchedAll.length > 0 && (
+                  <details style={{ fontSize: 12 }}>
+                    <summary style={{ cursor: "pointer", color: "#94a3b8" }}>25-26 pelaajat ilman EPM-lukua kannassa ({unmatchedAll.length}) — lasketaan EPM 0:na</summary>
+                    <div style={{ columns: "3 220px", marginTop: 6 }}>
+                      {unmatchedAll
+                        .sort((x, y) => y.effMin - x.effMin)
+                        .map((u) => (
+                          <div key={u.team + u.name}>
+                            {u.name} <span style={{ color: "#64748b" }}>({u.team.split(" ").pop()}, {u.effMin.toFixed(1)} min)</span>
+                          </div>
+                        ))}
+                    </div>
+                  </details>
+                )}
+              </>
             )}
-            <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>
-              Keltainen = poikkeaa alkutilanteesta (siirtynyt, minuutit muuttuneet tai ei aktiivinen). Net = O + D (pistettä / 100
-              possessiota). Harmaa 0.00 = joukkue on alkutilanteessa.
-            </div>
           </div>
         );
       })()}
@@ -903,8 +874,9 @@ export default function PlayersPage() {
             Valitse joukkue, käy EPM-sivustolla sen pelaajasivulla, valitse koko taulukko ja
             kopioi (Ctrl+A / Ctrl+C taulukon sisällä, tai valitse hiirellä), liitä tähän. Tämä
             päivittää <strong>vain valitun joukkueen</strong> rivit — muut joukkueet säilyvät
-            koskemattomina. MPG-luku otetaan talteen Baseline Mins -kenttään ja O-EPM/D-EPM
-            päivittyvät suoraan.
+            koskemattomina. Vain O-EPM/D-EPM päivittyvät — minuutteihin ja joukkueisiin ei kosketa
+            (ne tulevat Transactions-sivulta). EPM-sivun MPG on minuutit per <em>pelattu</em> peli, joten
+            sitä ei käytetä: loukkaantuneiden minuutit paisuisivat.
           </p>
 
           <div style={{ marginBottom: 12 }}>

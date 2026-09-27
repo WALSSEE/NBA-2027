@@ -109,6 +109,10 @@ export function computeOffseason(players: EpmPlayer[], prev: PrevRow[]): Record<
     const lk = looseKey(p.name);
     if (lk) (epmByLoose.get(lk) ?? epmByLoose.set(lk, []).get(lk)!).push(p);
   }
+  // Kirjoitusvirhehaku vain pelaajista, joiden nimi ei itse ole 25-26 datassa
+  // (ettei "Jaylin Williams" saa "Jalen Williamsin" lukuja).
+  const prevNames = new Set(prev.map((r) => normalizePlayerName(r.name)));
+  const fuzzyPool = players.filter((p) => !prevNames.has(normalizePlayerName(p.name)));
   const findEpm = (r: PrevRow): EpmPlayer | undefined => {
     if (r.nba_id && epmById.has(Number(r.nba_id))) return epmById.get(Number(r.nba_id));
     const exact = epmByName.get(normalizePlayerName(r.name));
@@ -116,7 +120,7 @@ export function computeOffseason(players: EpmPlayer[], prev: PrevRow[]): Record<
     const cands = epmByLoose.get(looseKey(r.name) ?? "") ?? [];
     const distinct = new Set(cands.map((c) => normalizePlayerName(c.name)));
     if (distinct.size === 1) return cands[0];
-    return undefined; // monitulkintainen -> ei arvata
+    return fuzzyFind(r.name, r.team, fuzzyPool); // kirjoitusvirhe? muuten undefined
   };
 
   const out: Record<string, OffseasonTeam> = {};
@@ -150,6 +154,13 @@ export function computeOffseason(players: EpmPlayer[], prev: PrevRow[]): Record<
     t.prevD += (p.depm * eff) / 48;
   }
   for (const t of Object.values(out)) {
+    // Pohjakin skaalataan tasan 240 minuuttiin (jatkoajat ym. -> summa 240–243),
+    // jotta muuttumaton rosteri antaa tasan 0.
+    if (t.prevMin > 0) {
+      const k = 240 / t.prevMin;
+      t.prevO *= k;
+      t.prevD *= k;
+    }
     t.offO = t.roleO - t.prevO;
     t.offD = t.roleD - t.prevD;
     t.unmatched.sort((a, b) => b.effMin - a.effMin);
@@ -184,12 +195,6 @@ export function teamMinuteScale(players: { team: string; mpg_base: number; activ
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Alkutilanne (Excelin rosterit ja minuutit). Tämä on pohja, josta joukkueen
-// 25-26 ORTG/DRTG koostuu: kun rosteri on alkutilanteessa, muutos on tasan 0.
-// Muutos = nykyinen rosteri − alkutilanne (EPM × minuutit / 48, O ja D erikseen).
-export type StartRow = { id?: string; team: string; name: string; mpg: number; in_team: boolean; oepm?: number | null; depm?: number | null };
-
 // Etsii players-taulusta saman pelaajan (tarkka nimi -> yksiselitteinen löysä nimi).
 export function makePlayerFinder<T extends { name: string; active?: boolean; mpg_base?: number }>(players: T[]) {
   const byName = new Map<string, T>();
@@ -209,55 +214,46 @@ export function makePlayerFinder<T extends { name: string; active?: boolean; mpg
   };
 }
 
-export function startMinuteScale(start: StartRow[]): Record<string, number> {
-  const sums: Record<string, number> = {};
-  for (const r of start) {
-    if (!r.in_team) continue;
-    sums[r.team] = (sums[r.team] ?? 0) + (Number(r.mpg) || 0);
-  }
-  const out: Record<string, number> = {};
-  for (const [team, sum] of Object.entries(sums)) out[team] = sum > 0 ? 240 / sum : 1;
-  return out;
+// Liigatason korjaus: joukkueiden Net-lukujen summa on määritelmällisesti 0, joten
+// kesän muutosten liigakeskiarvo ei voi olla todellista (se syntyy esim. tulokkaiden
+// arvioista tai puuttuvista EPM-luvuista). Vähennetään keskiarvo jokaiselta joukkueelta.
+export function leagueNormalize(off: Record<string, OffseasonTeam>): { teams: Record<string, OffseasonTeam>; meanO: number; meanD: number } {
+  const ts = Object.values(off).filter((t) => canonTeam(t.team));
+  if (ts.length === 0) return { teams: off, meanO: 0, meanD: 0 };
+  const meanO = ts.reduce((a, t) => a + t.offO, 0) / ts.length;
+  const meanD = ts.reduce((a, t) => a + t.offD, 0) / ts.length;
+  const teams: Record<string, OffseasonTeam> = {};
+  for (const [k, t] of Object.entries(off)) teams[k] = { ...t, offO: t.offO - meanO, offD: t.offD - meanD };
+  return { teams, meanO, meanD };
 }
 
-export function computeRosterChange(players: EpmPlayer[], start: StartRow[]): Record<string, OffseasonTeam> {
-  const find = makePlayerFinder(players);
-  const out: Record<string, OffseasonTeam> = {};
-  const get = (team: string) =>
-    (out[team] ??= { team, roleMin: 0, roleScale: 1, prevMin: 0, roleO: 0, roleD: 0, prevO: 0, prevD: 0, offO: 0, offD: 0, unmatched: [] });
-
-  const scale = teamMinuteScale(players);
-  for (const p of players) {
-    const team = canonTeam(p.team);
-    if (!team) continue;
-    const raw = p.active ? Number(p.mpg_base) || 0 : 0;
-    const m = raw * (scale[team] ?? 1);
-    const t = get(team);
-    t.roleMin += raw;
-    t.roleScale = scale[team] ?? 1;
-    t.roleO += (p.oepm * m) / 48;
-    t.roleD += (p.depm * m) / 48;
+// Kirjoitusvirheiden sieto ("Payton Watson" = "Peyton Watson", "Tari Easton" = "Tari Eason").
+export function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  const m = a.length, n = b.length;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
   }
-  const sScale = startMinuteScale(start);
-  for (const r of start) {
-    if (!r.in_team) continue;
-    const team = canonTeam(r.team) ?? r.team;
-    const raw = Number(r.mpg) || 0;
-    const m = raw * (sScale[r.team] ?? 1);
-    const t = get(team);
-    t.prevMin += raw;
-    // Sama EPM kuin nykyisessä rosterissa, jotta pelkkä EPM-päivitys ei näy muutoksena.
-    const p = find(r.name);
-    if (!p && raw > 0) t.unmatched.push({ name: r.name, effMin: raw });
-    const o = p ? Number(p.oepm) || 0 : Number(r.oepm) || 0;
-    const d = p ? Number(p.depm) || 0 : Number(r.depm) || 0;
-    t.prevO += (o * m) / 48;
-    t.prevD += (d * m) / 48;
+  return prev[n];
+}
+// Yksiselitteinen kirjoitusvirheosuma (enintään 2 merkin ero, vähintään 8 merkin nimet).
+// Ensisijaisesti saman joukkueen pelaajista.
+export function fuzzyFind<T extends { name: string; team: string }>(name: string, team: string | null, pool: T[]): T | undefined {
+  const n = normalizePlayerName(name);
+  if (n.length < 8) return undefined;
+  const hits = (cands: T[]) => {
+    const out = cands.filter((p) => {
+      const pn = normalizePlayerName(p.name);
+      return Math.abs(pn.length - n.length) <= 2 && pn[0] === n[0] && editDistance(pn, n) <= 2;
+    });
+    return new Set(out.map((p) => normalizePlayerName(p.name))).size === 1 ? out[0] : undefined;
+  };
+  if (team) {
+    const same = hits(pool.filter((p) => canonTeam(p.team) === team));
+    if (same) return same;
   }
-  for (const t of Object.values(out)) {
-    t.offO = t.roleO - t.prevO;
-    t.offD = t.roleD - t.prevD;
-    t.unmatched.sort((a, b) => b.effMin - a.effMin);
-  }
-  return out;
+  return hits(pool);
 }

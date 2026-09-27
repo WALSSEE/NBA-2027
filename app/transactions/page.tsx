@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
 import TeamUpdate from "./TeamUpdate";
-import type { StartRow } from "@/lib/prevSeason";
+import type { PrevRow } from "@/lib/prevSeason";
 
 type DbPlayer = {
   id: string;
@@ -56,10 +56,10 @@ export default function TransactionsPage() {
       else if (kind === "log") setResetStatus("Transaktioloki tyhjennetty. Rosterit ennallaan.");
       else
         setResetStatus(
-          `Alkutilanne palautettu: loki tyhjennetty, ${data.restored} pelaajaa palautettu alkujoukkueeseensa ja -minuutteihinsa` +
+          `Lähtötilanne palautettu: loki tyhjennetty, ${data.restored} pelaajaa kauden 25-26 viimeiseen joukkueeseensa, minuuteiksi koko kauden minuutit / 82` +
             (data.deactivatedDuplicates ? `, ${data.deactivatedDuplicates} vanhaa tuplariviä poistettu käytöstä` : "") +
             (data.zeroed ? `, ${data.zeroed} muun pelaajan minuutit nollattu` : "") +
-            (data.added?.length ? `. Lisätty kantaan: ${data.added.join(", ")}.` : ".")
+            (data.added?.length ? `. Lisätty kantaan EPM 0:lla (${data.added.length}): ${data.added.join(", ")}.` : ".")
         );
       setResetAsk(null);
       await Promise.all([loadPlayers(), loadTransactions()]);
@@ -105,12 +105,12 @@ export default function TransactionsPage() {
     }
   }
 
-  const [prevRows, setPrevRows] = useState<StartRow[]>([]);
+  const [prevRows, setPrevRows] = useState<PrevRow[]>([]);
   async function loadPrevRows() {
     try {
-      const res = await fetch("/api/season-start");
+      const res = await fetch("/api/prev-season");
       const data = await res.json();
-      setPrevRows((data.rows ?? []).map((r: any) => ({ ...r, mpg: Number(r.mpg) || 0 })));
+      setPrevRows((data.rows ?? []).map((r: any) => ({ ...r, gp: Number(r.gp) || 0, min_total: Number(r.min_total) || 0 })));
     } catch {
       setPrevRows([]);
     }
@@ -268,13 +268,14 @@ export default function TransactionsPage() {
       </p>
 
       <details style={{ marginBottom: 20, border: "1px solid #334155", borderRadius: 8, padding: "10px 14px", maxWidth: 820 }}>
-        <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Aloita alusta (tyhjennä loki / palauta alkutilanne)</summary>
+        <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Aloita alusta (tyhjennä loki / palauta lähtötilanne)</summary>
         <div style={{ fontSize: 12, color: "#94a3b8", margin: "10px 0" }}>
-          <strong>Palauta alkutilanne</strong>: tyhjentää transaktiolokin ja palauttaa jokaisen pelaajan Excelin mukaiseen
-          joukkueeseen ja minuutteihin (alkutilanne). Silloin joukkueiden ORTG/DRTG on täsmälleen 25-26 luku ja kesän muutos 0.
-          Sen jälkeen tee kesän siirrot ja minuutit Joukkue kerrallaan -näkymässä — vain ne muuttavat lukuja. Alkutilanteen
-          ulkopuoliset pelaajat (tulokkaat ym.) jäävät joukkueisiinsa 0 minuutilla. Alkutilanteen näet ja voit muokata
-          Players → Alkutilanne.
+          <strong>Palauta lähtötilanne</strong>: tyhjentää transaktiolokin ja siirtää jokaisen kaudella 25-26 pelanneen
+          pelaajan kauden viimeiseen joukkueeseensa. Minuuteiksi tulee hänen koko kauden minuuttinsa / 82 — täsmälleen se
+          paino, jolla hän oli joukkueen 25-26 luvuissa — joten kesän muutos on 0 (paitsi kesken kauden treidatuilla, joiden
+          vaikutus on todellinen). Sen jälkeen tee kesän siirrot ja roolit Joukkue kerrallaan -näkymässä: esim. koko kauden
+          loukkaantuneena ollut tähti saa terveenä enemmän minuutteja, ja vain nämä muutokset liikuttavat lukuja. Pohjan näet
+          Players → Pohja 25-26.
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <input
@@ -289,7 +290,7 @@ export default function TransactionsPage() {
             disabled={resetBusy || !secret}
             style={{ background: "#7f1d1d", color: "white", border: "none", borderRadius: 6, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}
           >
-            Palauta alkutilanne + tyhjennä loki
+            Palauta lähtötilanne + tyhjennä loki
           </button>
           <button
             onClick={() => setResetAsk("log")}
@@ -302,7 +303,7 @@ export default function TransactionsPage() {
         {resetAsk && (
           <div style={{ marginTop: 10, background: "#450a0a", borderRadius: 6, padding: "10px 12px", fontSize: 12 }}>
             {resetAsk === "full"
-              ? "Varmista: kaikki kirjatut siirrot poistetaan ja rosterit palautetaan alkutilanteeseen (Excel). Tehtyjä kesän muutoksia ei voi palauttaa."
+              ? "Varmista: kaikki kirjatut siirrot poistetaan ja rosterit ja minuutit palautetaan kauden 25-26 tilanteeseen. Tehtyjä kesän muutoksia ei voi palauttaa."
               : "Varmista: kaikki kirjatut siirrot poistetaan lokista. Pelaajien joukkueet ja minuutit eivät muutu."}
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button

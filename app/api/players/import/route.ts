@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { normalizePlayerName } from "@/lib/parseTransactions";
+import { looseKey } from "@/lib/prevSeason";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +9,53 @@ export const dynamic = "force-dynamic";
 // Suojattu samalla CRON_SECRET-arvolla kuin cron-reitit (Vercelissä jo
 // asetettu ympäristömuuttuja) — sivu app/players/page.tsx kysyy tämän
 // salasanan käyttäjältä ja lähettää sen Authorization-headerissa.
+// EPM-päivitys (EPM-sivun joukkue- ja liigatuonti): päivittää VAIN EPM-luvut.
+// Minuutit ja joukkue ovat Transactions-sivun hallinnassa, joten niihin ei
+// kosketa. Pelaaja tunnistetaan nimellä mistä joukkueesta tahansa (myös
+// siirron jälkeen). Uudet nimet lisätään 0 minuutilla.
+async function updateEpmOnly(supabase: ReturnType<typeof getSupabaseAdmin>, incoming: { team: string; name: string; pos?: string; oepm: number; depm: number }[]) {
+  const existing: any[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from("players").select("id, team, name").range(from, from + 999);
+    if (error) throw new Error(error.message);
+    existing.push(...(data ?? []));
+    if (!data || data.length < 1000) break;
+  }
+  const byNorm = new Map<string, any[]>();
+  const byLoose = new Map<string, any[]>();
+  for (const p of existing) {
+    const n = normalizePlayerName(p.name);
+    (byNorm.get(n) ?? byNorm.set(n, []).get(n)!).push(p);
+    const lk = looseKey(p.name);
+    if (lk) (byLoose.get(lk) ?? byLoose.set(lk, []).get(lk)!).push(p);
+  }
+  const updates = new Map<string, Record<string, unknown>>();
+  const inserts = new Map<string, Record<string, unknown>>();
+  for (const r of incoming) {
+    let group = byNorm.get(normalizePlayerName(r.name)) ?? [];
+    if (group.length === 0) {
+      const cands = byLoose.get(looseKey(r.name) ?? "") ?? [];
+      if (new Set(cands.map((c) => normalizePlayerName(c.name))).size === 1) group = cands;
+    }
+    if (group.length === 0) {
+      inserts.set(`${r.team}::${r.name}`, { team: r.team, name: r.name, pos: r.pos ?? "", mpg_base: 0, oepm: r.oepm, depm: r.depm, active: true });
+      continue;
+    }
+    for (const p of group) updates.set(p.id, { id: p.id, team: p.team, name: p.name, oepm: r.oepm, depm: r.depm });
+  }
+  const up = [...updates.values()];
+  for (let i = 0; i < up.length; i += 500) {
+    const { error } = await supabase.from("players").upsert(up.slice(i, i + 500), { onConflict: "id" });
+    if (error) throw new Error(error.message);
+  }
+  const ins = [...inserts.values()];
+  for (let i = 0; i < ins.length; i += 500) {
+    const { error } = await supabase.from("players").insert(ins.slice(i, i + 500));
+    if (error) throw new Error(error.message);
+  }
+  return { updated: up.length, added: ins.length };
+}
+
 export async function POST(request: Request) {
   const authHeader = request.headers.get("authorization");
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -16,13 +65,9 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => null);
   const players = body?.players;
   // mode "replace" (oletus): pyyhkii KOKO players-taulun ja korvaa sen.
-  // mode "team": päivittää yhden joukkueen (body.team) liitetyt pelaajat
-  // upsertilla; liitteestä puuttuvat pelaajat säilyvät, ellei niitä ole
-  // nimetty body.removeNames-listassa. Käytetään EPM-sivun joukkuetuonnissa.
-  // mode "merge": upsert (team,name) -avaimella, EI poista mitään. Tätä
-  // käytetään "koko liiga" -tuonnissa, kun dataa liitetään useassa
-  // pätkässä eri istunnoissa — vaatii players_team_name_unique-rajoitteen
-  // (ks. supabase/add_players_unique_constraint.sql).
+  // mode "team": EPM-sivun joukkuetuonti — päivittää vain EPM-luvut (ks. updateEpmOnly)
+  // ja poistaa body.removeNames-listan pelaajat joukkueesta.
+  // mode "merge": EPM-sivun koko liigan tuonti — päivittää vain EPM-luvut.
   const mode = body?.mode === "team" ? "team" : body?.mode === "merge" ? "merge" : "replace";
   const team = body?.team ? String(body.team).trim() : null;
 
@@ -47,18 +92,14 @@ export async function POST(request: Request) {
     // automaattisesti niitä joita liitteessä ei ole (esim. käsin lisätyt
     // tulokkaat, joita ei vielä ole EPM-sivulla). Poistetaan vain ne nimet,
     // jotka käyttäjä on erikseen valinnut (body.removeNames).
-    const rows = players.map((p: any) => ({
-      team,
-      name: p.name,
-      pos: p.pos ?? "",
-      mpg_base: p.mpg_base ?? 0,
-      oepm: p.oepm ?? 0,
-      depm: p.depm ?? 0,
-      active: p.active ?? true,
-    }));
-    const { error: upsertError } = await supabase.from("players").upsert(rows, { onConflict: "team,name" });
-    if (upsertError) {
-      return NextResponse.json({ error: `Tallennus epäonnistui: ${upsertError.message}` }, { status: 500 });
+    let res;
+    try {
+      res = await updateEpmOnly(
+        supabase,
+        players.map((p: any) => ({ team: team!, name: p.name, pos: p.pos, oepm: p.oepm ?? 0, depm: p.depm ?? 0 }))
+      );
+    } catch (e: any) {
+      return NextResponse.json({ error: `Tallennus epäonnistui: ${e.message}` }, { status: 500 });
     }
     const removeNames: string[] = Array.isArray(body?.removeNames) ? body.removeNames.map(String) : [];
     if (removeNames.length > 0) {
@@ -70,39 +111,20 @@ export async function POST(request: Request) {
         );
       }
     }
-    return NextResponse.json({ ok: true, count: rows.length, removed: removeNames.length });
+    return NextResponse.json({ ok: true, count: res.updated + res.added, added: res.added, removed: removeNames.length });
   }
 
   if (mode === "merge") {
-    const rows = players.map((p: any) => ({
-      team: p.team,
-      name: p.name,
-      pos: p.pos ?? "",
-      mpg_base: p.mpg_base ?? 0,
-      oepm: p.oepm ?? 0,
-      depm: p.depm ?? 0,
-      active: p.active ?? true,
-    }));
-    const CHUNK = 500;
-    let upserted = 0;
-    for (let i = 0; i < rows.length; i += CHUNK) {
-      const chunk = rows.slice(i, i + CHUNK);
-      const { error: upsertError } = await supabase
-        .from("players")
-        .upsert(chunk, { onConflict: "team,name" });
-      if (upsertError) {
-        return NextResponse.json(
-          {
-            error: `Tallennus epäonnistui (${upserted}/${rows.length} tallennettu ennen virhettä): ${upsertError.message}. Onko players_team_name_unique-rajoite ajettu Supabasessa? (ks. supabase/add_players_unique_constraint.sql)`,
-          },
-          { status: 500 }
-        );
-      }
-      upserted += chunk.length;
+    try {
+      const res = await updateEpmOnly(
+        supabase,
+        players.map((p: any) => ({ team: p.team, name: p.name, pos: p.pos, oepm: p.oepm ?? 0, depm: p.depm ?? 0 }))
+      );
+      return NextResponse.json({ ok: true, count: res.updated + res.added, added: res.added });
+    } catch (e: any) {
+      return NextResponse.json({ error: `Tallennus epäonnistui: ${e.message}` }, { status: 500 });
     }
-    return NextResponse.json({ ok: true, count: upserted });
   }
-
   // mode "replace": koko roster korvataan kerralla.
   const { error: deleteError } = await supabase.from("players").delete().not("id", "is", null);
   if (deleteError) {
