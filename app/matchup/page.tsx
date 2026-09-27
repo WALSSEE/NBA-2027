@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { headshotUrl, initials, lastName, teamLogoUrl } from "@/lib/nbaAssets";
 import { fairOdds, gameProbabilities, pct } from "@/lib/probability";
-import { computeOffseason, type PrevRow } from "@/lib/prevSeason";
+import { computeOffseason, teamMinuteScale, canonTeam, type PrevRow } from "@/lib/prevSeason";
 
 type TeamStats = {
   id: string;
@@ -104,7 +104,7 @@ function ewma(prior: number, values: number[], alpha: number): number {
   return rating;
 }
 
-const baseMin = (p: DbPlayer) => (p.active ? Number(p.mpg_base) || 0 : 0);
+const rawBaseMin = (p: DbPlayer) => (p.active ? Number(p.mpg_base) || 0 : 0);
 
 const POS_RANK: Record<string, number> = { PG: 1, G: 1.5, SG: 2, GF: 2.5, "G-F": 2.5, SF: 3, F: 3.5, PF: 4, "F-C": 4.5, FC: 4.5, C: 5 };
 const posRank = (pos: string) => POS_RANK[(pos || "").toUpperCase().replace(/\s/g, "")] ?? 3;
@@ -395,6 +395,14 @@ export default function MatchupPage() {
 
   // Treidin delta vaimenee samaa tahtia kuin EWMA oppii saman asian peleistä.
   const usePrev = prevRows.length > 0;
+  // Uudessa rakenteessa oletusminuutit ovat roolien painoja: joukkueen
+  // aktiivisten minuutit skaalataan summaan 240 (sama kerroin kuin kesän muutoksessa).
+  const minuteScale = useMemo(() => (usePrev ? teamMinuteScale(players) : {}), [usePrev, players]);
+  const baseMin = (p: DbPlayer) => {
+    const t = canonTeam(p.team);
+    const k = t ? minuteScale[t] ?? 1 : 1;
+    return Math.round(rawBaseMin(p) * k * 10) / 10;
+  };
   const offseason = useMemo(() => (usePrev ? computeOffseason(players, prevRows) : {}), [usePrev, players, prevRows]);
   // Kauden ensimmäinen ottelupäivä otteluohjelmasta. Sitä ennen kirjatut siirrot
   // ovat kesän siirtoja, jotka sisältyvät jo rosteripohjaiseen kesän muutokseen.

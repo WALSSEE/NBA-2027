@@ -615,7 +615,7 @@ export default function PlayersPage() {
               <table style={{ borderCollapse: "collapse", fontSize: 12, marginBottom: 16 }}>
                 <thead>
                   <tr style={{ color: "#94a3b8", textAlign: "left" }}>
-                    {["Joukkue", "Viime kausi (vaikutusmin)", "Rosteri nyt (oletusmin)", "Kesän muutos O", "D", "Net", "EPM puuttuu"].map((h) => (
+                    {["Joukkue", "Viime kausi (vaikutusmin)", "Rosteri nyt (oletusmin → ×240)", "Kesän muutos O", "D", "Net", "EPM puuttuu"].map((h) => (
                       <th key={h} style={{ padding: "4px 8px" }}>
                         {h}
                       </th>
@@ -630,7 +630,10 @@ export default function PlayersPage() {
                       <tr key={t.team} style={{ borderTop: "1px solid #1e293b" }}>
                         <td style={{ padding: "4px 8px" }}>{t.team}</td>
                         <td style={{ padding: "4px 8px", color: Math.abs(t.prevMin - 240) <= 8 ? "#94a3b8" : "#fbbf24" }}>{t.prevMin.toFixed(0)}</td>
-                        <td style={{ padding: "4px 8px", color: minOk ? "#94a3b8" : "#fbbf24" }}>{t.roleMin.toFixed(0)}</td>
+                        <td style={{ padding: "4px 8px", color: minOk ? "#94a3b8" : "#fbbf24" }}>
+                          {t.roleMin.toFixed(0)}
+                          {!minOk && t.roleMin > 0 && <span style={{ color: "#64748b" }}> ×{t.roleScale.toFixed(2)}</span>}
+                        </td>
                         <td style={{ padding: "4px 8px" }}>{signed(t.offO)}</td>
                         <td style={{ padding: "4px 8px" }}>{signed(t.offD)}</td>
                         <td style={{ padding: "4px 8px", fontWeight: 700, color: net >= 0 ? "#4ade80" : "#f87171" }}>{signed(net)}</td>
@@ -642,8 +645,10 @@ export default function PlayersPage() {
               </table>
             )}
             <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>
-              Keltainen rosterin minuuttisumma = oletusminuutit eivät ole n. 240 — korjaa Transactions-näkymässä, muuten kesän
-              muutos vääristyy. Net = O + D (pistettä / 100 possessiota).
+              Oletusminuutit ovat roolien painoja: joukkueen summa skaalataan automaattisesti 240:een (kerroin näkyy keltaisen
+              summan perässä). Keltainen summa tarkoittaa, että roolien suhteet kannattaa tarkistaa Transactions-näkymässä — esim.
+              kauden lopun tankkausminuutit penkkipelaajilla tai loukkaantuneet, jotka eivät enää kuulu rotaatioon. Net = O + D
+              (pistettä / 100 possessiota).
             </div>
 
             {unmatchedAll.length > 0 && (

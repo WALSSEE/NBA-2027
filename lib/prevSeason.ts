@@ -70,7 +70,8 @@ type EpmPlayer = { team: string; name: string; oepm: number; depm: number; mpg_b
 
 export type OffseasonTeam = {
   team: string;
-  roleMin: number; // nykyisen rosterin oletusminuutit yhteensä
+  roleMin: number; // nykyisen rosterin oletusminuutit yhteensä (ennen skaalausta)
+  roleScale: number; // kerroin, jolla oletusminuutit skaalataan summaan 240
   prevMin: number; // viime kauden vaikutusminuutit yhteensä (≈ 240)
   roleO: number;
   roleD: number;
@@ -88,24 +89,43 @@ export type OffseasonTeam = {
 export function computeOffseason(players: EpmPlayer[], prev: PrevRow[]): Record<string, OffseasonTeam> {
   const epmById = new Map<number, EpmPlayer>();
   const epmByName = new Map<string, EpmPlayer>();
+  // Varatunnistus: sukunimi + etunimen kaksi ensimmäistä kirjainta
+  // ("Ronald Holland II" = "Ron Holland", "Scotty Pippen Jr." = "Scottie Pippen Jr").
+  const epmByLoose = new Map<string, EpmPlayer[]>();
   for (const p of players) {
     if (p.nba_id) epmById.set(Number(p.nba_id), p);
     const k = normalizePlayerName(p.name);
     // useampi rivi samalla nimellä -> suositaan aktiivista / minuutillista
     const cur = epmByName.get(k);
     if (!cur || (!cur.active && p.active) || (cur.mpg_base === 0 && p.mpg_base > 0)) epmByName.set(k, p);
+    const lk = looseKey(p.name);
+    if (lk) (epmByLoose.get(lk) ?? epmByLoose.set(lk, []).get(lk)!).push(p);
   }
+  const findEpm = (r: PrevRow): EpmPlayer | undefined => {
+    if (r.nba_id && epmById.has(Number(r.nba_id))) return epmById.get(Number(r.nba_id));
+    const exact = epmByName.get(normalizePlayerName(r.name));
+    if (exact) return exact;
+    const cands = epmByLoose.get(looseKey(r.name) ?? "") ?? [];
+    const distinct = new Set(cands.map((c) => normalizePlayerName(c.name)));
+    if (distinct.size === 1) return cands[0];
+    return undefined; // monitulkintainen -> ei arvata
+  };
 
   const out: Record<string, OffseasonTeam> = {};
   const get = (team: string) =>
-    (out[team] ??= { team, roleMin: 0, prevMin: 0, roleO: 0, roleD: 0, prevO: 0, prevD: 0, offO: 0, offD: 0, unmatched: [] });
+    (out[team] ??= { team, roleMin: 0, roleScale: 1, prevMin: 0, roleO: 0, roleD: 0, prevO: 0, prevD: 0, offO: 0, offD: 0, unmatched: [] });
 
+  // Kentällä on aina 240 minuuttia: oletusminuutit ovat roolien painoja, ja ne
+  // skaalataan joukkueittain summaan 240 (ks. teamMinuteScale).
+  const scale = teamMinuteScale(players);
   for (const p of players) {
     const team = canonTeam(p.team);
     if (!team) continue; // Free Agent tms.
-    const m = p.active ? Number(p.mpg_base) || 0 : 0;
+    const raw = p.active ? Number(p.mpg_base) || 0 : 0;
+    const m = raw * (scale[team] ?? 1);
     const t = get(team);
-    t.roleMin += m;
+    t.roleMin += raw;
+    t.roleScale = scale[team] ?? 1;
     t.roleO += (p.oepm * m) / 48;
     t.roleD += (p.depm * m) / 48;
   }
@@ -113,7 +133,7 @@ export function computeOffseason(players: EpmPlayer[], prev: PrevRow[]): Record<
     const eff = r.min_total / TEAM_GAMES;
     const t = get(r.team);
     t.prevMin += eff;
-    const p = (r.nba_id ? epmById.get(Number(r.nba_id)) : undefined) ?? epmByName.get(normalizePlayerName(r.name));
+    const p = findEpm(r);
     if (!p) {
       if (eff >= 0.5) t.unmatched.push({ name: r.name, effMin: eff });
       continue;
@@ -134,4 +154,24 @@ const CANON = new Map(Object.values(TEAM_NAME_BY_ABBR).map((t) => [normTeam(t), 
 // Palauttaa NBA-joukkueen virallisen nimen (sietää välilyöntieroja), muuten null.
 export function canonTeam(team: string): string | null {
   return CANON.get(normTeam(team)) ?? null;
+}
+
+function looseKey(name: string): string | null {
+  const parts = normalizePlayerName(name).split(" ").filter(Boolean);
+  if (parts.length < 2) return null;
+  return `${parts[parts.length - 1]}|${parts[0].slice(0, 2)}`;
+}
+
+// Joukkuekohtainen kerroin, jolla aktiivisten pelaajien oletusminuutit
+// skaalataan summaan 240. Joukkue, jolla ei ole minuutteja -> 1.
+export function teamMinuteScale(players: { team: string; mpg_base: number; active: boolean }[]): Record<string, number> {
+  const sums: Record<string, number> = {};
+  for (const p of players) {
+    const team = canonTeam(p.team);
+    if (!team || !p.active) continue;
+    sums[team] = (sums[team] ?? 0) + (Number(p.mpg_base) || 0);
+  }
+  const out: Record<string, number> = {};
+  for (const [team, sum] of Object.entries(sums)) out[team] = sum > 0 ? 240 / sum : 1;
+  return out;
 }
