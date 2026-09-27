@@ -13,7 +13,7 @@ export async function GET() {
   for (let from = 0; ; from += 1000) {
     const { data, error } = await supabase
       .from("prev_season_minutes")
-      .select("team, name, nba_id, gp, min_total")
+      .select("team, name, nba_id, gp, min_total, final_team")
       .eq("season", PREV_SEASON)
       .order("team")
       .order("name")

@@ -89,6 +89,7 @@ create table if not exists prev_season_minutes (
   nba_id bigint,
   gp int not null default 0,
   min_total numeric not null default 0,
+  final_team boolean not null default true,
   updated_at timestamptz default now(),
   unique (season, team, name)
 );

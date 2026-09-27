@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
 import TeamUpdate from "./TeamUpdate";
+import type { StartRow } from "@/lib/prevSeason";
 
 type DbPlayer = {
   id: string;
@@ -36,6 +37,38 @@ export default function TransactionsPage() {
   const [loadingTx, setLoadingTx] = useState(true);
 
   const [mode, setMode] = useState<"team" | "single">("team");
+  const [resetAsk, setResetAsk] = useState<null | "log" | "full">(null);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetStatus, setResetStatus] = useState<string | null>(null);
+
+  async function runReset(kind: "log" | "full") {
+    setResetBusy(true);
+    setResetStatus(null);
+    localStorage.setItem("cron_secret", secret);
+    try {
+      const res = await fetch("/api/offseason/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+        body: JSON.stringify({ mode: kind, confirm: "RESET" }),
+      });
+      const data = await res.json().catch(() => ({ error: `palvelin vastasi ${res.status}` }));
+      if (!res.ok) setResetStatus(`Virhe: ${data.error ?? res.status}`);
+      else if (kind === "log") setResetStatus("Transaktioloki tyhjennetty. Rosterit ennallaan.");
+      else
+        setResetStatus(
+          `Alkutilanne palautettu: loki tyhjennetty, ${data.restored} pelaajaa palautettu alkujoukkueeseensa ja -minuutteihinsa` +
+            (data.deactivatedDuplicates ? `, ${data.deactivatedDuplicates} vanhaa tuplariviä poistettu käytöstä` : "") +
+            (data.zeroed ? `, ${data.zeroed} muun pelaajan minuutit nollattu` : "") +
+            (data.added?.length ? `. Lisätty kantaan: ${data.added.join(", ")}.` : ".")
+        );
+      setResetAsk(null);
+      await Promise.all([loadPlayers(), loadTransactions()]);
+    } catch (e: any) {
+      setResetStatus(`Virhe: ${e?.message ?? "tuntematon virhe"}`);
+    } finally {
+      setResetBusy(false);
+    }
+  }
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [newTeam, setNewTeam] = useState(ALL_TEAMS[0] ?? "");
@@ -56,6 +89,7 @@ export default function TransactionsPage() {
     setSecret(localStorage.getItem("cron_secret") ?? "");
     loadPlayers();
     loadTransactions();
+    loadPrevRows();
   }, []);
 
   async function loadPlayers() {
@@ -68,6 +102,17 @@ export default function TransactionsPage() {
       // ei haittaa
     } finally {
       setLoadingPlayers(false);
+    }
+  }
+
+  const [prevRows, setPrevRows] = useState<StartRow[]>([]);
+  async function loadPrevRows() {
+    try {
+      const res = await fetch("/api/season-start");
+      const data = await res.json();
+      setPrevRows((data.rows ?? []).map((r: any) => ({ ...r, mpg: Number(r.mpg) || 0 })));
+    } catch {
+      setPrevRows([]);
     }
   }
 
@@ -222,6 +267,65 @@ export default function TransactionsPage() {
         minuutit päivittyvät samalla Pelaajat-sivulle.
       </p>
 
+      <details style={{ marginBottom: 20, border: "1px solid #334155", borderRadius: 8, padding: "10px 14px", maxWidth: 820 }}>
+        <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Aloita alusta (tyhjennä loki / palauta alkutilanne)</summary>
+        <div style={{ fontSize: 12, color: "#94a3b8", margin: "10px 0" }}>
+          <strong>Palauta alkutilanne</strong>: tyhjentää transaktiolokin ja palauttaa jokaisen pelaajan Excelin mukaiseen
+          joukkueeseen ja minuutteihin (alkutilanne). Silloin joukkueiden ORTG/DRTG on täsmälleen 25-26 luku ja kesän muutos 0.
+          Sen jälkeen tee kesän siirrot ja minuutit Joukkue kerrallaan -näkymässä — vain ne muuttavat lukuja. Alkutilanteen
+          ulkopuoliset pelaajat (tulokkaat ym.) jäävät joukkueisiinsa 0 minuutilla. Alkutilanteen näet ja voit muokata
+          Players → Alkutilanne.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <input
+            type="password"
+            value={secret}
+            onChange={(e) => setSecret(e.target.value)}
+            placeholder="CRON_SECRET"
+            style={{ background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "6px 8px", fontSize: 12, width: 150 }}
+          />
+          <button
+            onClick={() => setResetAsk("full")}
+            disabled={resetBusy || !secret}
+            style={{ background: "#7f1d1d", color: "white", border: "none", borderRadius: 6, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}
+          >
+            Palauta alkutilanne + tyhjennä loki
+          </button>
+          <button
+            onClick={() => setResetAsk("log")}
+            disabled={resetBusy || !secret}
+            style={{ background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}
+          >
+            Tyhjennä vain loki
+          </button>
+        </div>
+        {resetAsk && (
+          <div style={{ marginTop: 10, background: "#450a0a", borderRadius: 6, padding: "10px 12px", fontSize: 12 }}>
+            {resetAsk === "full"
+              ? "Varmista: kaikki kirjatut siirrot poistetaan ja rosterit palautetaan alkutilanteeseen (Excel). Tehtyjä kesän muutoksia ei voi palauttaa."
+              : "Varmista: kaikki kirjatut siirrot poistetaan lokista. Pelaajien joukkueet ja minuutit eivät muutu."}
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button
+                onClick={() => runReset(resetAsk)}
+                disabled={resetBusy}
+                style={{ background: "#dc2626", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}
+              >
+                {resetBusy ? "Tehdään..." : "Kyllä, tee se"}
+              </button>
+              <button
+                onClick={() => setResetAsk(null)}
+                style={{ background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}
+              >
+                Peru
+              </button>
+            </div>
+          </div>
+        )}
+        {resetStatus && (
+          <div style={{ marginTop: 8, fontSize: 12, color: resetStatus.startsWith("Virhe") ? "#f87171" : "#4ade80" }}>{resetStatus}</div>
+        )}
+      </details>
+
       <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: "1px solid #334155" }}>
         {[
           { key: "team" as const, label: "Joukkue kerrallaan" },
@@ -255,6 +359,7 @@ export default function TransactionsPage() {
               await Promise.all([loadPlayers(), loadTransactions()]);
             }}
             txPlayerNames={new Set(transactions.map((t) => `${t.player_name}::${t.team}`))}
+            prevRows={prevRows}
           />
         </div>
       )}

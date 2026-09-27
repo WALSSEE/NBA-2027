@@ -4,7 +4,9 @@ import { normalizePlayerName } from "./parseTransactions";
 export const PREV_SEASON = "2025-26";
 export const TEAM_GAMES = 82;
 
-export type PrevRow = { team: string; name: string; nba_id?: number | null; gp: number; min_total: number };
+// final_team = pelaajan viimeinen joukkue viime kaudella (kesken kauden
+// treidatulla vain viimeisellä rivillä true).
+export type PrevRow = { team: string; name: string; nba_id?: number | null; gp: number; min_total: number; final_team?: boolean };
 
 // Basketball-Referencen joukkuelyhenteet, jotka eroavat NBA:n omista.
 const BREF_ABBR: Record<string, string> = { BRK: "BKN", CHO: "CHA", PHO: "PHX" };
@@ -63,7 +65,13 @@ export function parseBrefTotals(raw: string): { rows: PrevRow[]; warnings: strin
     byKey.set(`${team}::${name}`, { team, name, gp: Number.isNaN(g) ? 0 : Math.round(g), min_total: mp });
   }
   if (skippedTeams > 0) warnings.push(`${skippedTeams} riviä ohitettu tuntemattoman joukkuelyhenteen takia.`);
-  return { rows: [...byKey.values()], warnings };
+  // Basketball-Reference listaa treidatun pelaajan joukkuerivit aikajärjestyksessä,
+  // joten viimeinen rivi = viimeinen joukkue.
+  const rows = [...byKey.values()];
+  const lastIdx = new Map<string, number>();
+  rows.forEach((r, i) => lastIdx.set(normalizePlayerName(r.name), i));
+  rows.forEach((r, i) => (r.final_team = lastIdx.get(normalizePlayerName(r.name)) === i));
+  return { rows, warnings };
 }
 
 type EpmPlayer = { team: string; name: string; oepm: number; depm: number; mpg_base: number; active: boolean; nba_id?: number | null };
@@ -156,7 +164,7 @@ export function canonTeam(team: string): string | null {
   return CANON.get(normTeam(team)) ?? null;
 }
 
-function looseKey(name: string): string | null {
+export function looseKey(name: string): string | null {
   const parts = normalizePlayerName(name).split(" ").filter(Boolean);
   if (parts.length < 2) return null;
   return `${parts[parts.length - 1]}|${parts[0].slice(0, 2)}`;
@@ -173,5 +181,83 @@ export function teamMinuteScale(players: { team: string; mpg_base: number; activ
   }
   const out: Record<string, number> = {};
   for (const [team, sum] of Object.entries(sums)) out[team] = sum > 0 ? 240 / sum : 1;
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Alkutilanne (Excelin rosterit ja minuutit). Tämä on pohja, josta joukkueen
+// 25-26 ORTG/DRTG koostuu: kun rosteri on alkutilanteessa, muutos on tasan 0.
+// Muutos = nykyinen rosteri − alkutilanne (EPM × minuutit / 48, O ja D erikseen).
+export type StartRow = { id?: string; team: string; name: string; mpg: number; in_team: boolean; oepm?: number | null; depm?: number | null };
+
+// Etsii players-taulusta saman pelaajan (tarkka nimi -> yksiselitteinen löysä nimi).
+export function makePlayerFinder<T extends { name: string; active?: boolean; mpg_base?: number }>(players: T[]) {
+  const byName = new Map<string, T>();
+  const byLoose = new Map<string, T[]>();
+  for (const p of players) {
+    const k = normalizePlayerName(p.name);
+    const cur = byName.get(k);
+    if (!cur || (!cur.active && p.active) || (Number(cur.mpg_base) === 0 && Number(p.mpg_base) > 0)) byName.set(k, p);
+    const lk = looseKey(p.name);
+    if (lk) (byLoose.get(lk) ?? byLoose.set(lk, []).get(lk)!).push(p);
+  }
+  return (name: string): T | undefined => {
+    const exact = byName.get(normalizePlayerName(name));
+    if (exact) return exact;
+    const cands = byLoose.get(looseKey(name) ?? "") ?? [];
+    return new Set(cands.map((c) => normalizePlayerName(c.name))).size === 1 ? cands[0] : undefined;
+  };
+}
+
+export function startMinuteScale(start: StartRow[]): Record<string, number> {
+  const sums: Record<string, number> = {};
+  for (const r of start) {
+    if (!r.in_team) continue;
+    sums[r.team] = (sums[r.team] ?? 0) + (Number(r.mpg) || 0);
+  }
+  const out: Record<string, number> = {};
+  for (const [team, sum] of Object.entries(sums)) out[team] = sum > 0 ? 240 / sum : 1;
+  return out;
+}
+
+export function computeRosterChange(players: EpmPlayer[], start: StartRow[]): Record<string, OffseasonTeam> {
+  const find = makePlayerFinder(players);
+  const out: Record<string, OffseasonTeam> = {};
+  const get = (team: string) =>
+    (out[team] ??= { team, roleMin: 0, roleScale: 1, prevMin: 0, roleO: 0, roleD: 0, prevO: 0, prevD: 0, offO: 0, offD: 0, unmatched: [] });
+
+  const scale = teamMinuteScale(players);
+  for (const p of players) {
+    const team = canonTeam(p.team);
+    if (!team) continue;
+    const raw = p.active ? Number(p.mpg_base) || 0 : 0;
+    const m = raw * (scale[team] ?? 1);
+    const t = get(team);
+    t.roleMin += raw;
+    t.roleScale = scale[team] ?? 1;
+    t.roleO += (p.oepm * m) / 48;
+    t.roleD += (p.depm * m) / 48;
+  }
+  const sScale = startMinuteScale(start);
+  for (const r of start) {
+    if (!r.in_team) continue;
+    const team = canonTeam(r.team) ?? r.team;
+    const raw = Number(r.mpg) || 0;
+    const m = raw * (sScale[r.team] ?? 1);
+    const t = get(team);
+    t.prevMin += raw;
+    // Sama EPM kuin nykyisessä rosterissa, jotta pelkkä EPM-päivitys ei näy muutoksena.
+    const p = find(r.name);
+    if (!p && raw > 0) t.unmatched.push({ name: r.name, effMin: raw });
+    const o = p ? Number(p.oepm) || 0 : Number(r.oepm) || 0;
+    const d = p ? Number(p.depm) || 0 : Number(r.depm) || 0;
+    t.prevO += (o * m) / 48;
+    t.prevD += (d * m) / 48;
+  }
+  for (const t of Object.values(out)) {
+    t.offO = t.roleO - t.prevO;
+    t.offD = t.roleD - t.prevD;
+    t.unmatched.sort((a, b) => b.effMin - a.effMin);
+  }
   return out;
 }

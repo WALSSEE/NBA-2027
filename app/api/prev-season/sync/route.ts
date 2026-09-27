@@ -31,7 +31,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const agg = new Map<string, { team: string; name: string; nba_id: number; gp: number; min_total: number }>();
+  const agg = new Map<string, { team: string; name: string; nba_id: number; gp: number; min_total: number; last: string; final_team?: boolean }>();
   let unknownTeam = 0;
   for (const g of logs) {
     const team = TEAM_NAME_BY_ABBR[g.TEAM_ABBREVIATION];
@@ -41,12 +41,17 @@ export async function POST(request: Request) {
     }
     const min = Number(g.MIN) || 0;
     const key = `${g.PLAYER_ID}::${team}`;
-    const cur = agg.get(key) ?? { team, name: g.PLAYER_NAME, nba_id: Number(g.PLAYER_ID), gp: 0, min_total: 0 };
+    const cur = agg.get(key) ?? { team, name: g.PLAYER_NAME, nba_id: Number(g.PLAYER_ID), gp: 0, min_total: 0, last: "" };
     if (min > 0) cur.gp += 1;
     cur.min_total += min;
+    if (String(g.GAME_DATE ?? "") > cur.last) cur.last = String(g.GAME_DATE ?? "");
     agg.set(key, cur);
   }
   const rows = [...agg.values()].filter((r) => r.min_total > 0);
+  // viimeinen joukkue = se, jossa pelaajan viimeisin ottelu
+  const lastByPlayer = new Map<number, string>();
+  for (const r of rows) if ((lastByPlayer.get(r.nba_id) ?? "") < r.last) lastByPlayer.set(r.nba_id, r.last);
+  for (const r of rows) r.final_team = lastByPlayer.get(r.nba_id) === r.last;
   if (rows.length === 0) {
     return NextResponse.json({ error: `NBA palautti ${logs.length} riviä, mutta niistä ei saatu minuutteja.` }, { status: 502 });
   }

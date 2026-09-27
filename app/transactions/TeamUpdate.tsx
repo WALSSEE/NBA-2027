@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
 import { parseTeamTransactions, normalizePlayerName, type ParsedMove } from "@/lib/parseTransactions";
 import { ROOKIE_PRESETS } from "@/lib/rookies";
+import { looseKey, type StartRow } from "@/lib/prevSeason";
 
 export type DbPlayer = {
   id: string;
@@ -43,6 +44,7 @@ export default function TeamUpdate({
   setSecret,
   onSaved,
   txPlayerNames,
+  prevRows = [],
 }: {
   players: DbPlayer[];
   secret: string;
@@ -51,7 +53,28 @@ export default function TeamUpdate({
   // Pelaajat, joille on jo kirjattu transaktioita (nimi::joukkue) — heitä ei
   // tarjota "tulokas"-kirjaukseen.
   txPlayerNames: Set<string>;
+  prevRows?: StartRow[];
 }) {
+  // Alkutilanteen (Excel) minuutit pelaajittain.
+  const findStart = useMemo(() => {
+    const byName = new Map<string, StartRow[]>();
+    for (const r of prevRows) {
+      if (!r.in_team) continue;
+      for (const k of [normalizePlayerName(r.name), `L:${looseKey(r.name)}`]) (byName.get(k) ?? byName.set(k, []).get(k)!).push(r);
+    }
+    return (name: string): StartRow | undefined => {
+      const exact = byName.get(normalizePlayerName(name));
+      if (exact) return exact[0];
+      const loose = byName.get(`L:${looseKey(name)}`);
+      return loose && new Set(loose.map((r) => normalizePlayerName(r.name))).size === 1 ? loose[0] : undefined;
+    };
+  }, [prevRows]);
+  function prevInfo(p: DbPlayer): string | null {
+    if (prevRows.length === 0) return null;
+    const r = findStart(p.name);
+    if (!r) return "alku: ei alkutilanteessa";
+    return `alku: ${r.team.split(" ").pop()} ${Number(r.mpg).toFixed(0)} min`;
+  }
   const [team, setTeam] = useState(ALL_TEAMS[0] ?? "");
   const [paste, setPaste] = useState("");
   // pelaajan id -> kohdejoukkue (tai FREE_AGENT)
@@ -499,8 +522,8 @@ export default function TeamUpdate({
         {teamPlayers.length > 0 && teamPlayers.filter((p) => p.active).reduce((x, p) => x + p.mpg_base, 0) === 0 && (
           <div style={{ fontSize: 12, color: "#fbbf24", background: "#422006", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
             Kaikilla joukkueen {team} pelaajilla on kannassa 0 minuuttia. Todennäköisesti joukkue on tuotu EPM-sivulta, jolla ei
-            vielä ole tämän kauden minuutteja. Aseta minuutit tähän käsin ennen tallennusta, tai tuo joukkue uudelleen Players-sivulla
-            viime kauden sivulta.
+            vielä ole tämän kauden minuutteja. Aseta minuutit tähän käsin ennen tallennusta, tai palauta alkutilanne
+            (Aloita alusta -laatikko).
           </div>
         )}
 
@@ -571,6 +594,7 @@ export default function TeamUpdate({
                 <tr key={p.id} style={{ borderTop: "1px solid #1e293b", opacity: p.active ? 1 : 0.5 }}>
                   <td style={{ padding: 4 }}>
                     {p.name} <span style={{ color: "#64748b" }}>{p.pos}</span>
+                    {prevInfo(p) && <div style={{ fontSize: 10, color: "#64748b" }}>{prevInfo(p)}</div>}
                     {incoming && <span style={{ color: "#4ade80" }}> · tulee ({additions[p.id]})</span>}
                     {isRookie(p) && <span style={{ color: "#a78bfa" }}> · tulokas</span>}
                     {!p.active && <span style={{ color: "#64748b" }}> · inaktiivinen</span>}

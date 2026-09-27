@@ -15,6 +15,7 @@ export async function replaceSeasonRows(rows: any[]): Promise<{ count: number; e
       nba_id: r.nba_id ? Number(r.nba_id) : null,
       gp: Math.round(Number(r.gp) || 0),
       min_total: Number(r.min_total) || 0,
+      final_team: r.final_team !== false,
     }));
   let count = 0;
   for (let i = 0; i < clean.length; i += 500) {
