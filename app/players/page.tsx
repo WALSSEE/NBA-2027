@@ -49,7 +49,10 @@ export default function PlayersPage() {
     try {
       const res = await fetch("/api/prev-season/sync", { method: "POST", headers: { Authorization: `Bearer ${secret}` } });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) setPrevStatus(`Virhe: ${data.error ?? res.status}`);
+      if (!res.ok)
+        setPrevStatus(
+          `Virhe: ${data.error ?? `palvelin vastasi ${res.status}`}. NBA estää todennäköisesti haun — käytä alla olevaa Basketball-Reference-liitettä.`
+        );
       else {
         setPrevStatus(`Haettu NBA:sta: ${data.count} pelaaja–joukkue-riviä (${data.logs} pelilokiriviä).`);
         await loadPrevRows();
@@ -118,7 +121,7 @@ export default function PlayersPage() {
         method: "POST",
         headers: { Authorization: `Bearer ${secret}` },
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({ error: `palvelin vastasi ${res.status} (aikakatkaisu tai kaatuminen)` }));
       if (!res.ok) {
         setSyncStatus(`Virhe: ${data.error ?? res.status}`);
       } else {
@@ -1226,7 +1229,7 @@ export default function PlayersPage() {
       <div style={{ marginTop: 40, marginBottom: 8, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <h2 style={{ fontSize: 16, margin: 0 }}>Nykyinen tietokannan rosteri ({current.length} pelaajaa)</h2>
         <span style={{ fontSize: 12, color: "#64748b" }}>
-          Kuva löytyy {current.filter((p: any) => p.nba_id).length}/{current.length} pelaajalle
+          Kuva löytyy {current.filter((p: any) => p.headshot_url || p.nba_id).length}/{current.length} pelaajalle
         </span>
         <button
           onClick={handleSyncIds}

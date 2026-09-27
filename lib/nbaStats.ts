@@ -16,8 +16,19 @@ const NBA_HEADERS: Record<string, string> = {
   "Cache-Control": "no-cache",
 };
 
-export async function nbaStatsFetch(url: string): Promise<any> {
-  const res = await fetch(url, { headers: NBA_HEADERS, cache: "no-store" });
+export async function nbaStatsFetch(url: string, timeoutMs = 25000): Promise<any> {
+  // stats.nba.com jättää pilvipalvelimien pyynnöt usein roikkumaan -> aikaraja,
+  // jotta käyttäjä saa selkeän virheen eikä Vercelin 504:ää.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: NBA_HEADERS, cache: "no-store", signal: ctrl.signal });
+  } catch (e: any) {
+    throw new Error(e?.name === "AbortError" ? `stats.nba.com ei vastannut ${timeoutMs / 1000} sekunnissa (estää todennäköisesti Vercelin palvelimet)` : e?.message ?? String(e));
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     throw new Error(`stats.nba.com vastasi ${res.status}: ${await res.text()}`);
   }

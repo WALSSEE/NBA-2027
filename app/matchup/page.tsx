@@ -49,6 +49,7 @@ type DbPlayer = {
   depm: number;
   active: boolean;
   nba_id: number | null;
+  headshot_url?: string | null;
   out_since: string | null;
   out_until: string | null;
   gp_prev_season: number | null;
@@ -117,9 +118,9 @@ const COURT_SLOTS = [
   { x: 66, y: 72 }, // C
 ];
 
-function Avatar({ name, nbaId, size, ring, dim }: { name: string; nbaId: number | null; size: number; ring?: string; dim?: boolean }) {
+function Avatar({ name, nbaId, url, size, ring, dim }: { name: string; nbaId: number | null; url?: string | null; size: number; ring?: string; dim?: boolean }) {
   const [failed, setFailed] = useState(false);
-  const src = headshotUrl(nbaId);
+  const src = headshotUrl(nbaId, url);
   return (
     <div
       style={{
@@ -220,7 +221,7 @@ function Court({ starters, color, onRemove }: { starters: DbPlayer[]; color: str
               width: 80,
             }}
           >
-            <Avatar name={p.name} nbaId={p.nba_id} size={50} ring={color} />
+            <Avatar name={p.name} nbaId={p.nba_id} url={p.headshot_url} size={50} ring={color} />
             <div style={{ fontSize: 11, marginTop: 3, textAlign: "center", textShadow: "0 1px 2px #000", whiteSpace: "nowrap" }}>
               {lastName(p.name)}
             </div>
@@ -717,7 +718,7 @@ export default function MatchupPage() {
     });
   }
 
-  const missingPhotos = players.filter((p) => (p.team === homeTeam || p.team === awayTeam) && !p.nba_id).length;
+  const missingPhotos = players.filter((p) => (p.team === homeTeam || p.team === awayTeam) && !p.nba_id && !p.headshot_url).length;
 
   const card = { background: "#111827", border: "1px solid #1f2937", borderRadius: 12 };
   const smallInput = {
@@ -819,7 +820,7 @@ export default function MatchupPage() {
                   >
                     ★
                   </button>
-                  <Avatar name={p.name} nbaId={p.nba_id} size={30} dim={zero} />
+                  <Avatar name={p.name} nbaId={p.nba_id} url={p.headshot_url} size={30} dim={zero} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</div>
                     <div style={{ fontSize: 10, color: "#64748b" }}>

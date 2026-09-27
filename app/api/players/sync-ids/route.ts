@@ -1,79 +1,73 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { nbaStatsFetch, resultSetToObjects } from "@/lib/nbaStats";
 import { normalizePlayerName } from "@/lib/parseTransactions";
-import { normalizeTeamName } from "@/lib/teamNames";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const SEASON = process.env.NBA_SEASON ?? "2026-27";
+// Hakee pelaajakuvat ESPN:n joukkuerostereista (NBA:n oma tilastopalvelin
+// ei vastaa Vercelin palvelimille). ESPN:n joukkue-id:t ovat 1–30.
+// Kuvan osoite tallennetaan players.headshot_url-sarakkeeseen nimen perusteella.
+async function fetchRoster(espnTeamId: number) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/${espnTeamId}/roster`, {
+      signal: ctrl.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return (data?.athletes ?? []) as any[];
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
-// Hakee NBA:n pelaajahakemiston (playerindex) ja kirjoittaa jokaiselle
-// players-taulun pelaajalle nba_id:n nimen perusteella. nba_id:llä haetaan
-// pelaajakuvat NBA:n CDN:stä (Matchup-sivu). Ajetaan käsin Players-sivun
-// napista aina kun rosteriin on tullut uusia pelaajia.
 export async function POST(request: Request) {
   const authHeader = request.headers.get("authorization");
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  let index: any[];
-  try {
-    const url = `https://stats.nba.com/stats/playerindex?College=&Country=&DraftPick=&DraftRound=&DraftYear=&Height=&Historical=1&LeagueID=00&Season=${SEASON}&SeasonType=Regular%20Season&TeamID=0&Weight=`;
-    const data = await nbaStatsFetch(url);
-    const rs = data?.resultSets?.[0] ?? data?.resultSet;
-    if (!rs?.headers || !rs?.rowSet) {
-      return NextResponse.json(
-        { error: "NBA:n vastauksen muoto oli odottamaton.", rawSample: JSON.stringify(data).slice(0, 1500) },
-        { status: 502 }
-      );
+  const ids = Array.from({ length: 30 }, (_, i) => i + 1);
+  const results = await Promise.allSettled(ids.map((id) => fetchRoster(id)));
+  const byName = new Map<string, string>();
+  let failedTeams = 0;
+  for (const r of results) {
+    if (r.status !== "fulfilled") {
+      failedTeams += 1;
+      continue;
     }
-    index = resultSetToObjects(rs);
-  } catch (e: any) {
-    return NextResponse.json({ error: `NBA-hakemiston haku epäonnistui: ${e?.message ?? e}` }, { status: 502 });
+    for (const a of r.value) {
+      const href = a?.headshot?.href;
+      const name = a?.displayName ?? a?.fullName;
+      if (href && name) byName.set(normalizePlayerName(name), href);
+    }
   }
-
-  // nimi -> ehdokkaat (voi olla useita samannimisiä, esim. historiallisia)
-  const byName = new Map<string, any[]>();
-  for (const row of index) {
-    const full = `${row.PLAYER_FIRST_NAME ?? ""} ${row.PLAYER_LAST_NAME ?? ""}`.trim();
-    if (!full || !row.PERSON_ID) continue;
-    const key = normalizePlayerName(full);
-    if (!byName.has(key)) byName.set(key, []);
-    byName.get(key)!.push(row);
+  if (byName.size === 0) {
+    return NextResponse.json({ error: `ESPN:n rostereita ei saatu haettua (${failedTeams}/30 epäonnistui).` }, { status: 502 });
   }
 
   const supabase = getSupabaseAdmin();
-  const { data: players, error } = await supabase.from("players").select("id, team, name, nba_id");
+  const { data: players, error } = await supabase.from("players").select("id, team, name, headshot_url");
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: `${error.message}. Onko supabase/add_players_headshot.sql ajettu?` }, { status: 500 });
   }
 
-  const updates: { id: string; team: string; name: string; nba_id: number }[] = [];
+  const updates: { id: string; team: string; name: string; headshot_url: string }[] = [];
   const unmatched: string[] = [];
   for (const p of players ?? []) {
-    const candidates = byName.get(normalizePlayerName(p.name)) ?? [];
-    if (candidates.length === 0) {
-      if (!p.nba_id) unmatched.push(`${p.name} (${p.team})`);
+    const href = byName.get(normalizePlayerName(p.name));
+    if (!href) {
+      if (!p.headshot_url) unmatched.push(`${p.name} (${p.team})`);
       continue;
     }
-    // Samannimisistä: ensisijaisesti sama joukkue, sitten tuorein (TO_YEAR).
-    const sameTeam = candidates.find((c) => c.TEAM_ABBREVIATION && normalizeTeamName(c.TEAM_ABBREVIATION) === p.team);
-    const best =
-      sameTeam ??
-      [...candidates].sort((a, b) => Number(b.TO_YEAR ?? 0) - Number(a.TO_YEAR ?? 0))[0];
-    const id = Number(best.PERSON_ID);
-    if (id && id !== Number(p.nba_id)) updates.push({ id: p.id, team: p.team, name: p.name, nba_id: id });
+    if (href !== p.headshot_url) updates.push({ id: p.id, team: p.team, name: p.name, headshot_url: href });
   }
-
   for (let i = 0; i < updates.length; i += 500) {
     const { error: upErr } = await supabase.from("players").upsert(updates.slice(i, i + 500), { onConflict: "id" });
-    if (upErr) {
-      return NextResponse.json({ error: `Tallennus epäonnistui: ${upErr.message}` }, { status: 500 });
-    }
+    if (upErr) return NextResponse.json({ error: `Tallennus epäonnistui: ${upErr.message}` }, { status: 500 });
   }
-
-  return NextResponse.json({ ok: true, indexSize: index.length, updated: updates.length, unmatched });
+  return NextResponse.json({ ok: true, espnPlayers: byName.size, failedTeams, updated: updates.length, unmatched });
 }

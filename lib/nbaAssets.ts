@@ -38,7 +38,8 @@ export function teamLogoUrl(team: string): string | null {
   return id ? `https://cdn.nba.com/logos/nba/${id}/global/L/logo.svg` : null;
 }
 
-export function headshotUrl(nbaId: number | null | undefined): string | null {
+export function headshotUrl(nbaId: number | null | undefined, url?: string | null): string | null {
+  if (url) return url;
   return nbaId ? `https://cdn.nba.com/headshots/nba/latest/260x190/${nbaId}.png` : null;
 }
 

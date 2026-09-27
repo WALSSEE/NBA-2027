@@ -14,6 +14,7 @@ create table if not exists players (
   out_since date,
   out_until date,
   gp_prev_season int,
+  headshot_url text,
   updated_at timestamptz default now()
 );
 
