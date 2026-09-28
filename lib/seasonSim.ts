@@ -74,6 +74,7 @@ export type TeamInput = {
   pace: number;
   hca: number;
   newShare: number; // uusien pelaajien osuus minuuteista (0–1)
+  extraSd?: number; // käsin lisätty joukkuekohtainen epävarmuus (Net)
   stars: { name: string; loss: number; missMean: number }[]; // loss = Net-pudotus kun poissa
 };
 
@@ -168,7 +169,7 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
   const LP = inputs.reduce((a, t) => a + t.pace, 0) / n;
   const games = schedule.filter((g) => idx.has(g.home) && idx.has(g.away)).map((g) => ({ h: idx.get(g.home)!, a: idx.get(g.away)!, w: g.w, result: g.result, fat: (g.aFat ?? 0) - (g.hFat ?? 0) }));
   const acc = inputs.map(() => ({ wins: new Float64Array(83), sumW: 0, top6: 0, pin: 0, po: 0, s1: 0, winsList: [] as number[] }));
-  const sdTeam = inputs.map((t) => Math.sqrt(opt.baseSd ** 2 + (opt.turnoverSd * t.newShare) ** 2));
+  const sdTeam = inputs.map((t) => Math.sqrt(opt.baseSd ** 2 + (opt.turnoverSd * t.newShare) ** 2 + (t.extraSd ?? 0) ** 2));
   const injMean = inputs.map((t) => t.stars.reduce((a, s) => a + s.loss * s.missMean, 0));
   const strength = new Float64Array(n);
   const wins = new Float64Array(n);
@@ -263,4 +264,25 @@ export function pOver(r: SimResult, line: number): number {
     if (w > line) p += x;
   });
   return p;
+}
+
+// Markkinan win totaleista johdettu "terve" Net jokaiselle joukkueelle: haetaan iteroimalla
+// Net, jolla simuloitu voittokeskiarvo osuu win total -rajaan samalla ohjelmalla,
+// kotiedulla, väsymyksellä ja loukkaantumisilla kuin mallissa.
+export function marketNets(inputs: TeamInput[], schedule: SimGame[], lines: Record<string, number>, opt: SimOptions): Record<string, number> {
+  const cur = inputs.map((t) => {
+    const inj = t.stars.reduce((a, st) => a + st.loss * st.missMean, 0);
+    const line = lines[t.team];
+    return { ...t, net: line != null ? (line - 41) / 2.7 + inj : t.net };
+  });
+  for (let it = 0; it < 4; it++) {
+    const res = simulateSeason(cur, schedule, { ...opt, sims: 1200 });
+    res.forEach((r, i) => {
+      const line = lines[r.team];
+      if (line != null) cur[i].net += (line - r.meanWins) / 2.7;
+    });
+  }
+  const out: Record<string, number> = {};
+  for (const t of cur) if (lines[t.team] != null) out[t.team] = t.net;
+  return out;
 }

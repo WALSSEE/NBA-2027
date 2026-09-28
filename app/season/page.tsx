@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { computePreseason, loadPreSettingsRemote, DEFAULT_PRE_SETTINGS, type PreSettings, type PreTeam } from "@/lib/preseason";
 import type { PrevRow } from "@/lib/prevSeason";
-import { buildSchedule, teamInputs, simulateSeason, pOver, type SimResult, type TeamInput } from "@/lib/seasonSim";
+import { buildSchedule, teamInputs, simulateSeason, marketNets, pOver, type SimResult, type TeamInput } from "@/lib/seasonSim";
 
 const SEASON_START = "2026-10-01";
 
@@ -24,6 +24,14 @@ export default function SeasonPage() {
   const [results, setResults] = useState<SimResult[] | null>(null);
   const [running, setRunning] = useState(false);
   const [openTeam, setOpenTeam] = useState<string | null>(null);
+  // Markkinan paino kausisimulaatiossa (win totalit). Kausivedoissa markkina on vahva: oletus 70 %.
+  const [marketBlend, setMarketBlend] = useState(70);
+  // Joukkuekohtaiset säädöt: lisäepävarmuus (Net) ja tähtien poissaolo-% (tallennetaan tietokantaan)
+  const [extraSd, setExtraSd] = useState<Record<string, number>>({});
+  const [missOv, setMissOv] = useState<Record<string, number>>({});
+  const [ovLoaded, setOvLoaded] = useState(false);
+  const [secret, setSecret] = useState("");
+  const [used, setUsed] = useState<Record<string, { model: number; market: number | null; used: number }>>({});
 
   useEffect(() => {
     (async () => {
@@ -44,18 +52,40 @@ export default function SeasonPage() {
           const m = (await fetch("/api/settings").then((x) => x.json()))?.settings?.model;
           if (m) setFatigue({ b2b: typeof m.b2bPenalty === "number" ? m.b2bPenalty : 2, threeInFour: typeof m.threeInFourPenalty === "number" ? m.threeInFourPenalty : 1.5 });
           if (m && typeof m.marginSd === "number") setGameSd(m.marginSd);
+          const so = (await fetch("/api/settings").then((x) => x.json()))?.settings?.season;
+          if (so) {
+            if (so.extraSd) setExtraSd(so.extraSd);
+            if (so.missOv) setMissOv(so.missOv);
+            if (typeof so.marketBlend === "number") setMarketBlend(so.marketBlend);
+          }
         } catch {
           // oletukset
         }
       } finally {
         setLoading(false);
+        setOvLoaded(true);
+        setSecret(localStorage.getItem("cron_secret") ?? "");
       }
     })();
   }, []);
+  // Säätöjen tallennus tietokantaan
+  const ovJson = JSON.stringify({ extraSd, missOv, marketBlend });
+  useEffect(() => {
+    if (!ovLoaded || !secret) return;
+    const t = setTimeout(() => {
+      fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+        body: JSON.stringify({ key: "season", value: JSON.parse(ovJson) }),
+      }).catch(() => {});
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [ovJson, ovLoaded, secret]);
 
   const inputs: TeamInput[] = useMemo(() => {
     if (teams.length === 0 || players.length === 0) return [];
-    const pre = computePreseason(teams, players, prevRows, settings);
+    // Win totalit sekoitetaan tällä sivulla omalla painollaan, joten Matchupin win total -painoa ei käytetä tässä.
+    const pre = computePreseason(teams, players, prevRows, { ...settings, marketWeight: 0 });
     const base = teams
       .filter((t) => pre.byTeam[t.team])
       .map((t) => ({
@@ -64,14 +94,35 @@ export default function SeasonPage() {
         pace: pre.byTeam[t.team].paceBlend - (settings.paceShift ?? 0),
         hca: t.home_adv ?? 2.5,
       }));
-    return teamInputs(base, players, prevRows, settings.carry.player / 100);
-  }, [teams, players, prevRows, settings]);
+    const mean = base.reduce((a, t) => a + t.net, 0) / Math.max(1, base.length);
+    const ti = teamInputs(base.map((t) => ({ ...t, net: t.net - mean })), players, prevRows, settings.carry.player / 100);
+    return ti.map((t) => ({
+      ...t,
+      extraSd: extraSd[t.team] ?? 0,
+      stars: t.stars.map((st) => ({ ...st, missMean: missOv[`${t.team}|${st.name}`] ?? st.missMean })),
+    }));
+  }, [teams, players, prevRows, settings, extraSd, missOv]);
   const schedule = useMemo(() => buildSchedule(games, SEASON_START, fatigue), [games, fatigue]);
 
   function run() {
     setRunning(true);
     setTimeout(() => {
-      setResults(simulateSeason(inputs, schedule.games, { sims, baseSd, turnoverSd, injuryConc, gameSd }));
+      const opt = { sims, baseSd, turnoverSd, injuryConc, gameSd };
+      const lines: Record<string, number> = {};
+      for (const t of teams) if (t.win_total != null) lines[t.team] = Number(t.win_total);
+      const w = marketBlend / 100;
+      const mk = w > 0 && Object.keys(lines).length >= 20 ? marketNets(inputs, schedule.games, lines, opt) : {};
+      const mkVals = Object.values(mk);
+      const mkMean = mkVals.length ? mkVals.reduce((a, x) => a + x, 0) / mkVals.length : 0;
+      const u: Record<string, { model: number; market: number | null; used: number }> = {};
+      const blended = inputs.map((t) => {
+        const m = mk[t.team] != null ? mk[t.team] - mkMean : null;
+        const net = m != null ? (1 - w) * t.net + w * m : t.net;
+        u[t.team] = { model: t.net, market: m, used: net };
+        return { ...t, net };
+      });
+      setUsed(u);
+      setResults(simulateSeason(blended, schedule.games, opt));
       setRunning(false);
     }, 20);
   }
@@ -81,6 +132,7 @@ export default function SeasonPage() {
     return t?.win_total != null ? Number(t.win_total) : null;
   };
   const inp = (team: string) => inputs.find((x) => x.team === team);
+  const signedN = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(1)}`;
   const pctS = (p: number) => `${(p * 100).toFixed(p < 0.1 && p > 0 ? 1 : 0)} %`;
   const fair = (p: number) => (p <= 0.001 ? "—" : (1 / p).toFixed(2));
   const evS = (p: number) => {
@@ -126,6 +178,11 @@ export default function SeasonPage() {
           Pelin hajonta (p)
           <br />
           <input type="number" step={0.5} value={gameSd} onChange={(e) => setGameSd(Number(e.target.value) || 12)} style={input} />
+        </label>
+        <label title="Kuinka paljon kausisimulaation joukkuetaso nojaa markkinan win totaleihin (0 % = pelkkä malli). Win totalit ovat tehokkaita markkinoita, joten kausivedoissa suositus on 60–80 %.">
+          Win totalien paino (%)
+          <br />
+          <input type="number" step={10} min={0} max={100} value={marketBlend} onChange={(e) => setMarketBlend(Math.max(0, Math.min(100, Number(e.target.value) || 0)))} style={input} />
         </label>
         <label>
           Win total -kerroin
@@ -206,12 +263,44 @@ export default function SeasonPage() {
                           {openTeam === r.team && ti && (
                             <tr>
                               <td />
-                              <td colSpan={14} style={{ padding: "4px 8px 10px", fontSize: 11, color: "#94a3b8", lineHeight: 1.7 }}>
-                                Tason epävarmuus ±{r.sd.toFixed(2)} Net (uusia minuutteja {(ti.newShare * 100).toFixed(0)} %).{schedule.real ? ` B2B-pelejä ohjelmassa ${schedule.b2bByTeam[r.team] ?? 0}.` : ""} Tähtien poissaolot:{" "}
-                                {ti.stars.length === 0
-                                  ? "ei merkittäviä"
-                                  : ti.stars.map((s) => `${s.name} (poissa ~${(s.missMean * 100).toFixed(0)} % peleistä, −${s.loss.toFixed(1)} Net kun poissa)`).join(" · ")}
-                                . Voittojakauma: {r.winDist.map((x, w) => (x > 0.004 ? `${w}:${(x * 100).toFixed(0)}` : null)).filter(Boolean).join(" ")}
+                              <td colSpan={14} style={{ padding: "4px 8px 10px", fontSize: 11, color: "#94a3b8", lineHeight: 1.9 }}>
+                                <div>
+                                  Net: malli {used[r.team] ? signedN(used[r.team].model) : "—"}
+                                  {used[r.team]?.market != null ? ` · markkina ${signedN(used[r.team].market!)}` : ""} · käytetty {signedN(r.net)}. Tason epävarmuus ±
+                                  {r.sd.toFixed(2)} Net (uusia minuutteja {(ti.newShare * 100).toFixed(0)} %).
+                                  {schedule.real ? ` B2B-pelejä ohjelmassa ${schedule.b2bByTeam[r.team] ?? 0}.` : ""}
+                                </div>
+                                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", margin: "4px 0" }} onClick={(e) => e.stopPropagation()}>
+                                  <label>
+                                    Lisäepävarmuus (Net){" "}
+                                    <input
+                                      type="number"
+                                      step={0.5}
+                                      value={extraSd[r.team] ?? 0}
+                                      onChange={(e) => setExtraSd((x) => ({ ...x, [r.team]: Math.max(0, Number(e.target.value) || 0) }))}
+                                      style={{ ...input, width: 54 }}
+                                    />
+                                  </label>
+                                  {ti.stars.map((st) => (
+                                    <label key={st.name}>
+                                      {st.name} poissa %{" "}
+                                      <input
+                                        type="number"
+                                        step={5}
+                                        value={Math.round(st.missMean * 100)}
+                                        onChange={(e) =>
+                                          setMissOv((x) => ({ ...x, [`${r.team}|${st.name}`]: Math.max(0, Math.min(95, Number(e.target.value) || 0)) / 100 }))
+                                        }
+                                        style={{ ...input, width: 50 }}
+                                      />{" "}
+                                      <span style={{ color: "#64748b" }}>(−{st.loss.toFixed(1)} Net kun poissa)</span>
+                                    </label>
+                                  ))}
+                                  <span style={{ color: "#64748b" }}>Muutokset tallentuvat; aja simulaatio uudelleen.</span>
+                                </div>
+                                <div>
+                                  Voittojakauma: {r.winDist.map((x, w) => (x > 0.004 ? `${w}:${(x * 100).toFixed(0)}` : null)).filter(Boolean).join(" ")}
+                                </div>
                               </td>
                             </tr>
                           )}
