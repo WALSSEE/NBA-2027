@@ -74,7 +74,7 @@ export type TeamInput = {
   pace: number;
   hca: number;
   newShare: number; // uusien pelaajien osuus minuuteista (0–1)
-  extraSd?: number; // käsin lisätty joukkuekohtainen epävarmuus (Net)
+  sdOverride?: number; // käsin asetettu joukkueen tason epävarmuus (Net-hajonta), ohittaa automaattisen
   stars: { name: string; loss: number; missMean: number }[]; // loss = Net-pudotus kun poissa
 };
 
@@ -163,13 +163,17 @@ export type SimResult = {
   winDist: number[]; // voittojen jakauma 0..82
 };
 
+export function autoSd(t: TeamInput, opt: { baseSd: number; turnoverSd: number }): number {
+  return Math.sqrt(opt.baseSd ** 2 + (opt.turnoverSd * t.newShare) ** 2);
+}
+
 export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: SimOptions): SimResult[] {
   const idx = new Map(inputs.map((t, i) => [t.team, i]));
   const n = inputs.length;
   const LP = inputs.reduce((a, t) => a + t.pace, 0) / n;
   const games = schedule.filter((g) => idx.has(g.home) && idx.has(g.away)).map((g) => ({ h: idx.get(g.home)!, a: idx.get(g.away)!, w: g.w, result: g.result, fat: (g.aFat ?? 0) - (g.hFat ?? 0) }));
   const acc = inputs.map(() => ({ wins: new Float64Array(83), sumW: 0, top6: 0, pin: 0, po: 0, s1: 0, winsList: [] as number[] }));
-  const sdTeam = inputs.map((t) => Math.sqrt(opt.baseSd ** 2 + (opt.turnoverSd * t.newShare) ** 2 + (t.extraSd ?? 0) ** 2));
+  const sdTeam = inputs.map((t) => t.sdOverride ?? autoSd(t, opt));
   const injMean = inputs.map((t) => t.stars.reduce((a, s) => a + s.loss * s.missMean, 0));
   const strength = new Float64Array(n);
   const wins = new Float64Array(n);
