@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
+import { computePreseason, loadPreSettings, DEFAULT_PRE_SETTINGS, type PreSettings } from "@/lib/preseason";
+import type { PrevRow } from "@/lib/prevSeason";
 
 type TeamStats = {
   id?: string;
@@ -18,7 +20,7 @@ type TeamStats = {
 };
 
 type NumField = "ortg_2425" | "drtg_2425" | "pace_2425" | "ortg_2526" | "drtg_2526" | "pace_2526" | "home_adv" | "win_total";
-type SortKey = "team" | "net_2425" | "net_2526" | "net_change" | NumField;
+type SortKey = "team" | "net_2425" | "net_2526" | "net_change" | "off_o" | "off_d" | "off_net" | "pre_ortg" | "pre_drtg" | "pre_net" | NumField;
 
 const ALL_TEAMS = Array.from(new Set(Object.values(TEAM_NAME_BY_ABBR))).sort();
 
@@ -63,12 +65,37 @@ export default function TeamsPage() {
   const [loading, setLoading] = useState(true);
   const [savingTeam, setSavingTeam] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
-  const [sortKey, setSortKey] = useState<SortKey>("net_2526");
+  const [sortKey, setSortKey] = useState<SortKey>("pre_net");
+  // Kesän muutos ja preseason 26-27 (sama laskenta ja asetukset kuin Matchupissa).
+  const [players, setPlayers] = useState<any[]>([]);
+  const [prevRows, setPrevRows] = useState<PrevRow[]>([]);
+  const [preSettings, setPreSettings] = useState<PreSettings>(DEFAULT_PRE_SETTINGS);
   const [sortDesc, setSortDesc] = useState(true);
 
   useEffect(() => {
     setSecret(localStorage.getItem("cron_secret") ?? "");
+    setPreSettings(loadPreSettings());
     load();
+    (async () => {
+      try {
+        const [pj, rj] = await Promise.all([
+          fetch("/api/players/import").then((r) => r.json()),
+          fetch("/api/prev-season").then((r) => r.json()),
+        ]);
+        setPlayers(
+          (pj.players ?? []).map((p: any) => ({
+            ...p,
+            oepm: Number(p.oepm) || 0,
+            depm: Number(p.depm) || 0,
+            mpg_base: Number(p.mpg_base) || 0,
+            active: p.active !== false,
+          }))
+        );
+        setPrevRows((rj.rows ?? []).map((r: any) => ({ ...r, gp: Number(r.gp) || 0, min_total: Number(r.min_total) || 0 })));
+      } catch {
+        // ei haittaa — sarakkeet jäävät tyhjiksi
+      }
+    })();
   }, []);
 
   async function load() {
@@ -126,23 +153,41 @@ export default function TeamsPage() {
       setSortKey(key);
       // Nimi A-Ö nousevasti, luvut oletuksena suurin ensin — paitsi DRTG, jossa
       // pienin (paras puolustus) ensin.
-      setSortDesc(key !== "team" && !key.startsWith("drtg"));
+      setSortDesc(key !== "team" && !key.startsWith("drtg") && key !== "pre_drtg");
     }
   }
+
+  const pre = useMemo(() => {
+    const ts = Object.values(saved).filter((t) => t.ortg_2526 != null || t.ortg_2425 != null);
+    if (ts.length === 0 || players.length === 0) return null;
+    return computePreseason(ts, players, prevRows, preSettings);
+  }, [saved, players, prevRows, preSettings]);
+  const preVal = (team: string, key: SortKey): number | null => {
+    const p = pre?.byTeam[team];
+    if (!p) return null;
+    if (key === "off_o") return p.offO;
+    if (key === "off_d") return p.offD;
+    if (key === "off_net") return p.offO + p.offD;
+    if (key === "pre_ortg") return p.ortg;
+    if (key === "pre_drtg") return p.drtg;
+    if (key === "pre_net") return p.net;
+    return null;
+  };
 
   // Järjestys lasketaan tallennetuista arvoista; tyhjät aina viimeiseksi.
   const sortedTeams = useMemo(() => {
     const list = ALL_TEAMS.map((t) => saved[t] ?? emptyRow(t));
+    const val = (r: TeamStats, k: SortKey) => (k.startsWith("off_") || k.startsWith("pre_") ? preVal(r.team, k) : sortValue(r, k));
     return list.sort((a, b) => {
-      const va = sortValue(a, sortKey);
-      const vb = sortValue(b, sortKey);
+      const va = val(a, sortKey);
+      const vb = val(b, sortKey);
       if (va == null && vb == null) return 0;
       if (va == null) return 1;
       if (vb == null) return -1;
       const cmp = typeof va === "string" ? va.localeCompare(vb as string) : (va as number) - (vb as number);
       return sortDesc ? -cmp : cmp;
     });
-  }, [saved, sortKey, sortDesc]);
+  }, [saved, sortKey, sortDesc, pre]);
 
   const inputStyle = {
     width: 60,
@@ -206,6 +251,29 @@ export default function TeamsPage() {
     );
   }
 
+  function plainCell(v: number | null) {
+    return (
+      <td style={{ padding: "2px 8px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: v == null ? "#475569" : "#cbd5e1" }}>
+        {v == null ? "—" : v.toFixed(1)}
+      </td>
+    );
+  }
+  function deltaCell(v: number | null, bold = false) {
+    return (
+      <td
+        style={{
+          padding: "2px 6px",
+          textAlign: "right",
+          fontVariantNumeric: "tabular-nums",
+          fontWeight: bold ? 700 : 400,
+          color: v == null ? "#475569" : Math.abs(v) < 0.05 ? "#64748b" : v > 0 ? "#4ade80" : "#f87171",
+        }}
+      >
+        {v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(2)}`}
+      </td>
+    );
+  }
+
   const groupHead = { padding: "4px", fontSize: 11, color: "#64748b", textAlign: "center" as const, borderBottom: "1px solid #1e293b" };
 
   return (
@@ -216,6 +284,15 @@ export default function TeamsPage() {
         vain 25-26 dataa) ja kotietu (HCA, pistettä). Net Rating = ORTG − DRTG lasketaan automaattisesti. Klikkaa
         sarakkeen otsikkoa järjestääksesi. Tallenna muutokset rivi kerrallaan.
       </p>
+      <div style={{ fontSize: 12, color: "#64748b", margin: "-8px 0 16px", maxWidth: 900, lineHeight: 1.6 }}>
+        <strong style={{ color: "#93c5fd" }}>Preseason 26-27</strong> = joukkueen lähtötaso ensimmäiseen otteluun: kausiblendi, regressio
+        (pelaajat {preSettings.carry.player} % · jäännös {preSettings.carry.res} %), kesän muutos Transactionsista
+        {preSettings.leagueNorm ? " (liigakeskiarvo vähennetty)" : ""}
+        {preSettings.marketWeight > 0 ? ` ja win totalit ${preSettings.marketWeight} %` : ""}. Asetukset tulevat Matchupista (tässä
+        selaimessa). <strong>Kesän muutos</strong> on pelaajakertoimella ({preSettings.carry.player} %) skaalattu, D positiivinen = parempi
+        puolustus. Pelattujen otteluiden EWMA ei ole mukana.
+        {!pre && " Ladataan pelaajia..."}
+      </div>
 
       <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
         <label style={{ fontSize: 12, color: "#94a3b8" }}>CRON_SECRET</label>
@@ -234,6 +311,12 @@ export default function TeamsPage() {
               <tr>
                 <th />
                 <th />
+                <th colSpan={3} style={{ ...groupHead, color: "#93c5fd" }}>
+                  Preseason 26-27
+                </th>
+                <th colSpan={3} style={groupHead}>
+                  Kesän muutos
+                </th>
                 <th colSpan={4} style={groupHead}>
                   Kausi 25-26
                 </th>
@@ -246,6 +329,12 @@ export default function TeamsPage() {
               <tr style={{ textAlign: "left" }}>
                 <th style={{ padding: "6px 4px", color: "#64748b" }}>#</th>
                 <SortHeader k="team" label="Joukkue" />
+                <SortHeader k="pre_net" label="Net" title="Kauden 26-27 lähtötaso: regressio + kesän muutos (+ win total -paino), kuten Matchupissa" />
+                <SortHeader k="pre_ortg" label="ORTG" />
+                <SortHeader k="pre_drtg" label="DRTG" />
+                <SortHeader k="off_o" label="O" title="Kesän muutos hyökkäykseen (Transactions: rosteri nyt − 25-26 pohja)" />
+                <SortHeader k="off_d" label="D" title="Kesän muutos puolustukseen (+ = parempi puolustus)" />
+                <SortHeader k="off_net" label="Net" title="Kesän muutos yhteensä" />
                 <SortHeader k="net_2526" label="Net" title="Net Rating 25-26 (ORTG − DRTG)" />
                 <SortHeader k="ortg_2526" label="ORTG" />
                 <SortHeader k="drtg_2526" label="DRTG" />
@@ -272,6 +361,12 @@ export default function TeamsPage() {
                   <tr key={team} style={{ borderTop: "1px solid #1e293b" }}>
                     <td style={{ padding: 4, color: "#475569", textAlign: "right" }}>{i + 1}</td>
                     <td style={{ padding: 4, whiteSpace: "nowrap" }}>{team}</td>
+                    {netCell(preVal(team, "pre_net"), true)}
+                    {plainCell(preVal(team, "pre_ortg"))}
+                    {plainCell(preVal(team, "pre_drtg"))}
+                    {deltaCell(preVal(team, "off_o"))}
+                    {deltaCell(preVal(team, "off_d"))}
+                    {deltaCell(preVal(team, "off_net"), true)}
                     {netCell(n2526, true)}
                     {numInput(team, "ortg_2526", row.ortg_2526)}
                     {numInput(team, "drtg_2526", row.drtg_2526)}

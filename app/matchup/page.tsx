@@ -4,7 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { headshotUrl, initials, lastName, teamLogoUrl } from "@/lib/nbaAssets";
 import { fairOdds, gameProbabilities, normCdf, pct } from "@/lib/probability";
 import { consensus, bestPrice, usGameDate, type OddsEvent, type BookLines } from "@/lib/odds";
-import { computeOffseason, leagueNormalize, teamMinuteScale, canonTeam, type PrevRow } from "@/lib/prevSeason";
+import { teamMinuteScale, canonTeam, type PrevRow } from "@/lib/prevSeason";
+import { computePreseason, calibrateCarry, WINS_PER_NET } from "@/lib/preseason";
 
 type TeamStats = {
   id: string;
@@ -514,18 +515,13 @@ export default function MatchupPage() {
     const k = t ? minuteScale[t] ?? 1 : 1;
     return Math.round(rawBaseMin(p) * k * 10) / 10;
   };
-  const offseasonNorm = useMemo(() => {
-    if (!usePrev) return { teams: {} as ReturnType<typeof computeOffseason>, meanO: 0, meanD: 0 };
-    const raw = computeOffseason(players, prevRows);
-    const n = leagueNormalize(raw);
-    return leagueNorm ? n : { ...n, teams: raw };
-  }, [usePrev, players, prevRows, leagueNorm]);
-  const offseason = offseasonNorm.teams;
-  const explainedMean = useMemo(() => {
-    const ts = Object.values(offseasonNorm.teams).filter((t) => canonTeam(t.team));
-    if (ts.length === 0) return { o: 0, d: 0 };
-    return { o: ts.reduce((s, t) => s + t.prevO, 0) / ts.length, d: ts.reduce((s, t) => s + t.prevD, 0) / ts.length };
-  }, [offseasonNorm]);
+  // Kauden lähtötaso (regressio + kesän muutos + win totalit) — sama kuin Teams-sivulla.
+  const pre = useMemo(
+    () => computePreseason(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight }),
+    [teams, players, prevRows, blendWeight, carry, leagueNorm, marketWeight]
+  );
+  const offseasonNorm = { meanO: pre.meanO, meanD: pre.meanD };
+  const offseason = pre.offseason;
   // Kauden ensimmäinen ottelupäivä otteluohjelmasta. Sitä ennen kirjatut siirrot
   // ovat kesän siirtoja, jotka sisältyvät jo rosteripohjaiseen kesän muutokseen.
   const seasonStart = useMemo(() => games.reduce((m, g) => (g.date && g.date < m ? g.date : m), "9999-12-31"), [games]);
@@ -614,66 +610,19 @@ export default function MatchupPage() {
     return { o, d, total, roster };
   }
 
-  function blendOf(team: TeamStats) {
-    const w = team.coach_change ? 1 : blendWeight / 100;
-    const mix = (a: number | null, b: number | null) => (a ?? b ?? LEAGUE_AVG_PACE) * w + (b ?? a ?? LEAGUE_AVG_PACE) * (1 - w);
-    return { o: mix(team.ortg_2526, team.ortg_2425), d: mix(team.drtg_2526, team.drtg_2425), p: mix(team.pace_2526, team.pace_2425) };
+  const winTotalView = { rows: pre.winRows };
+  const [calib, setCalib] = useState<ReturnType<typeof calibrateCarry> | null>(null);
+  function runCalibration() {
+    setCalib(calibrateCarry(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight }));
   }
-  // Lähtötason liigakeskiarvot (regressio vedetään näitä kohti).
-  const priorLeague = (() => {
-    const bs = teams.map(blendOf);
-    if (bs.length === 0) return { r: 114, p: LEAGUE_AVG_PACE };
-    return { r: bs.reduce((s, b) => s + (b.o + b.d) / 2, 0) / bs.length, p: bs.reduce((s, b) => s + b.p, 0) / bs.length };
-  })();
-
-  // Kauden lähtötaso ennen pelattuja otteluita (regressio + kesän muutos).
-  function priorFor(team: TeamStats) {
-    const bl = blendOf(team);
-    const kpl = carry.player / 100;
-    const kres = carry.res / 100;
-    const kp = carry.pace / 100;
-    const base = usePrev ? offseason[team.team] : undefined;
-    // Pelaajista selittyvä osa liigakeskiarvoon nähden (O: + parempi hyökkäys, D: + parempi puolustus).
-    const explO = base ? base.prevO - explainedMean.o : 0;
-    const explD = base ? base.prevD - explainedMean.d : 0;
-    const resO = base ? bl.o - priorLeague.r - explO : 0;
-    const resD = base ? priorLeague.r - bl.d - explD : 0;
-    const ortgBlend = base ? priorLeague.r + kpl * explO + kres * resO : priorLeague.r + kpl * (bl.o - priorLeague.r);
-    const drtgBlend = base ? priorLeague.r - kpl * explD - kres * resD : priorLeague.r + kpl * (bl.d - priorLeague.r);
-    const paceBlend = priorLeague.p + kp * (bl.p - priorLeague.p);
-    const offO = (base?.offO ?? 0) * kpl;
-    const offD = (base?.offD ?? 0) * kpl;
-    return { ortgBlend, drtgBlend, paceBlend, resO, resD, offO, offD, net: ortgBlend + offO - (drtgBlend - offD) };
-  }
-
-  // Win totalit: markkinan implisiittinen Net = (voitot − 41) / 2.7 (≈ 2.7 voittoa / Net-piste),
-  // normalisoituna liigan keskiarvoon 0. Mallin kauden alun Net verrataan tähän.
-  const WINS_PER_NET = 2.7;
-  const winTotalView = (() => {
-    const list = teams.filter((t) => t.win_total != null && !Number.isNaN(Number(t.win_total)));
-    if (list.length < 20) return { rows: [] as { team: string; wins: number; mkt: number; model: number; diff: number }[], byTeam: {} as Record<string, number> };
-    const pri = list.map((t) => ({ t, p: priorFor(t) }));
-    const mMean = pri.reduce((s, x) => s + x.p.net, 0) / pri.length;
-    const imp = list.map((t) => (Number(t.win_total) - 41) / WINS_PER_NET);
-    const iMean = imp.reduce((s, x) => s + x, 0) / imp.length;
-    const rows = pri.map((x, i) => {
-      const model = x.p.net - mMean;
-      const mkt = imp[i] - iMean;
-      return { team: x.t.team, wins: Number(x.t.win_total), mkt, model, diff: mkt - model };
-    });
-    const byTeam: Record<string, number> = {};
-    for (const r of rows) byTeam[r.team] = r.diff;
-    return { rows, byTeam };
-  })();
 
   function finalStatsFor(team: TeamStats | undefined) {
     if (!team) return null;
-    const pr = priorFor(team);
-    // Markkinaprior: siirretään lähtötasoa kohti win totalista johdettua Netiä
-    // (puolet hyökkäykseen, puolet puolustukseen).
-    const mktShift = (winTotalView.byTeam[team.team] ?? 0) * (marketWeight / 100);
-    const ortgBlend = pr.ortgBlend + mktShift / 2;
-    const drtgBlend = pr.drtgBlend - mktShift / 2;
+    const pr = pre.byTeam[team.team];
+    if (!pr) return null;
+    // Lähtötaso sisältää regression ja mahdollisen win total -siirron; kesän muutos lisätään alla.
+    const ortgBlend = pr.ortgBlend;
+    const drtgBlend = pr.drtgBlend;
     const paceBlend = pr.paceBlend;
     const resO = pr.resO;
     const resD = pr.resD;
@@ -1451,6 +1400,44 @@ export default function MatchupPage() {
             muutos), molemmat liigakeskiarvoon nähden. Ero pisteinä ja voittoina: positiivinen = markkina pitää joukkuetta parempana kuin
             malli. Isot erot (punainen ≥ 3 p ≈ 8 voittoa) kannattaa tarkistaa: puuttuuko rosterista siirto, loukkaantuminen tai minuutit —
             vai tietääkö markkina jotain, mitä malli ei voi nähdä (tankkaus, valmentaja).
+          </div>
+          <div style={{ border: "1px solid #334155", borderRadius: 8, padding: 10, marginBottom: 12, maxWidth: 820 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <button onClick={runCalibration} style={{ background: "#2563eb", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>
+                Kalibroi regressio win totaleihin
+              </button>
+              <span style={{ fontSize: 11, color: "#64748b" }}>
+                Etsii pelaaja- ja jäännöskertoimet, joilla mallin joukkue-erot osuvat lähimmäs markkinaa (vain kaksi yleistä
+                kerrointa — joukkuekohtaiset erot jäävät näkyviin).
+              </span>
+            </div>
+            {calib && calib.best && calib.current && (
+              <div style={{ fontSize: 12, marginTop: 10, lineHeight: 1.7 }}>
+                <div>
+                  Nyt (pelaajat {calib.current.player} % · jäännös {calib.current.res} %): keskivirhe{" "}
+                  <strong>{calib.current.rmse.toFixed(2)}</strong> Net-pistettä, kulmakerroin {calib.current.slope.toFixed(2)}
+                  {calib.current.slope < 0.9 ? " (malli liian hajallaan — markkina regressoi enemmän)" : calib.current.slope > 1.1 ? " (malli liian tiivis)" : ""}
+                </div>
+                <div>
+                  Paras: pelaajat <strong>{calib.best.player} %</strong> · jäännös <strong>{calib.best.res} %</strong> → keskivirhe{" "}
+                  <strong>{calib.best.rmse.toFixed(2)}</strong>, kulmakerroin {calib.best.slope.toFixed(2)}{" "}
+                  <button
+                    onClick={() => setCarry({ ...carry, player: calib.best!.player, res: calib.best!.res })}
+                    style={{ ...smallInput, padding: "2px 10px", marginLeft: 6, cursor: "pointer" }}
+                  >
+                    Ota käyttöön
+                  </button>
+                </div>
+                <div style={{ color: "#64748b", fontSize: 11 }}>
+                  Seuraavaksi parhaat:{" "}
+                  {calib.grid
+                    .slice(1, 6)
+                    .map((g) => `${g.player}/${g.res} (${g.rmse.toFixed(2)})`)
+                    .join(" · ")}
+                  . Jos lähellä parasta on monta hyvin erilaista yhdistelmää, data ei erota niitä — valitse järkevä.
+                </div>
+              </div>
+            )}
           </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
