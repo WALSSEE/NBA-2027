@@ -23,6 +23,32 @@ export default function GamesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"upcoming" | "played">("upcoming");
+  const [secret, setSecret] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  useEffect(() => {
+    setSecret(localStorage.getItem("cron_secret") ?? "");
+  }, []);
+  async function runJob(kind: "schedule" | "results") {
+    setBusy(kind);
+    setMsg(null);
+    localStorage.setItem("cron_secret", secret);
+    try {
+      const res = await fetch(kind === "schedule" ? "/api/cron/update-schedule" : "/api/cron/update-nba-data", {
+        headers: { Authorization: `Bearer ${secret}` },
+      });
+      const j = await res.json().catch(() => ({ error: `palvelin vastasi ${res.status}` }));
+      if (!res.ok || j.ok === false) setMsg(`Virhe: ${j.error ?? res.status}`);
+      else if (kind === "schedule") setMsg(`Otteluohjelma haettu (${j.source}): ${j.total} ottelua, ${j.inserted} tallennettu.${j.notes?.length ? " " + j.notes.join(" · ") : ""}`);
+      else setMsg(`Tulokset päivitetty: ${j.updated} ottelua.${j.remainingDays ? ` Päiviä vielä jäljellä ${j.remainingDays} — paina uudelleen.` : ""}`);
+      const data = await fetch("/api/schedule").then((r) => r.json());
+      setGames(data.games ?? []);
+    } catch (e: any) {
+      setMsg(`Virhe: ${e?.message ?? e}`);
+    } finally {
+      setBusy(null);
+    }
+  }
 
   useEffect(() => {
     async function load() {
@@ -52,11 +78,27 @@ export default function GamesPage() {
     <div style={{ padding: 24, fontFamily: "system-ui", background: "#0f172a", color: "#e2e8f0", minHeight: "100vh" }}>
       <h1 style={{ fontSize: 20, marginBottom: 4 }}>Games — otteluohjelma</h1>
       <p style={{ color: "#64748b", fontSize: 13, margin: "8px 0 20px", maxWidth: 720 }}>
-        Data haetaan automaattisesti cron-tehtävillä. Pelatut ottelut (joilla on ORTG/DRTG/Pace)
-        syöttävät Matchup-laskurin EWMA-päivitykseen.
+        Otteluohjelma ja tulokset haetaan automaattisesti (ohjelma maanantaisin, tulokset päivittäin) NBA:n CDN:stä / ESPN:stä.
+        Pelatut ottelut (ORTG/DRTG/Pace) syöttävät Matchupin EWMA-päivitykseen ja Kausi-simulaatioon. Napeilla voit ajaa haun heti.
       </p>
 
       {error && <div style={{ color: "#f87171", fontSize: 13, marginBottom: 16 }}>Virhe: {error}</div>}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
+        <input
+          type="password"
+          value={secret}
+          onChange={(e) => setSecret(e.target.value)}
+          placeholder="CRON_SECRET"
+          style={{ background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "6px 8px", fontSize: 12, width: 150 }}
+        />
+        <button onClick={() => runJob("schedule")} disabled={!!busy || !secret} style={{ background: "#2563eb", color: "white", border: "none", borderRadius: 6, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+          {busy === "schedule" ? "Haetaan..." : "Hae kauden otteluohjelma"}
+        </button>
+        <button onClick={() => runJob("results")} disabled={!!busy || !secret} style={{ background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+          {busy === "results" ? "Päivitetään..." : "Päivitä pelattujen tulokset"}
+        </button>
+        {msg && <span style={{ fontSize: 12, color: msg.startsWith("Virhe") ? "#f87171" : "#4ade80" }}>{msg}</span>}
+      </div>
 
       <div style={{ display: "flex", gap: 4, marginBottom: 16 }}>
         <button

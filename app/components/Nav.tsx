@@ -10,6 +10,7 @@ const LINKS = [
   { href: "/transactions", label: "Transactions" },
   { href: "/matchup", label: "Matchup" },
   { href: "/games", label: "Games" },
+  { href: "/season", label: "Kausi" },
 ];
 
 // Jaettu yläpalkki/välilehdet kaikille sovelluksen sivuille. Client-
