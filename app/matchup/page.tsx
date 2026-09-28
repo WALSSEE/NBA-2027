@@ -17,6 +17,7 @@ type TeamStats = {
   drtg_2526: number | null;
   coach_change: boolean | null;
   home_adv: number | null;
+  win_total?: number | null;
 };
 
 type Transaction = {
@@ -66,9 +67,14 @@ const LEAGUE_AVG_PACE = 100;
 const DEFAULT_BLEND = 100;
 // Kauden alun regressio: viime kauden luvuista säilyy vain osa (NBA 2024-25 -> 2025-26:
 // Net ~54 %, tempo ~50 %). Rosterimuutokset lasketaan erikseen, joten oletus 70 %.
-const DEFAULT_CARRY = 70;
-const DEFAULT_PACE_CARRY = 50;
-const CARRY_KEY = "matchup_carry_v1";
+// Joukkueen viime kauden luku jaetaan kahteen osaan:
+//  - pelaajista selittyvä osa (Σ EPM × pohjaminuutit / 48) — kulkee pelaajien mukana
+//    rosterimuutoksissa; säilyy lähes kokonaan
+//  - jäännös (luku − selittyvä osa): tuuri, valmennus, tankkaus, EPM:n virhe — pysyy
+//    joukkueella, joten se regressoidaan voimakkaasti (2025-26: Hornets +5.0, Heat +6.3,
+//    Pacers −4.1 ...)
+const DEFAULT_CARRY = { player: 85, res: 50, pace: 50 };
+const CARRY_KEY = "matchup_carry_v2";
 const BLEND_KEY = "matchup_blend_weight_v1";
 const HOME_COLOR = "#60a5fa";
 const AWAY_COLOR = "#f59e0b";
@@ -280,16 +286,34 @@ export default function MatchupPage() {
 
   // Kausiblendi: oletus 100 % 25-26, oma säätö muistetaan selaimessa.
   const [blendWeight, setBlendWeightState] = useState(DEFAULT_BLEND);
-  const [carry, setCarryState] = useState({ rating: DEFAULT_CARRY, pace: DEFAULT_PACE_CARRY });
+  const [carry, setCarryState] = useState(DEFAULT_CARRY);
+  // Win totalien paino kauden alun lähtötasossa (0 = vain vertailu).
+  const [marketWeight, setMarketWeightState] = useState(0);
   useEffect(() => {
     try {
-      const v = JSON.parse(localStorage.getItem(CARRY_KEY) ?? "null");
-      if (v && typeof v.rating === "number" && typeof v.pace === "number") setCarryState(v);
+      const v = Number(localStorage.getItem("matchup_market_weight_v1"));
+      if (v >= 0 && v <= 100) setMarketWeightState(v);
     } catch {
       // ei haittaa
     }
   }, []);
-  function setCarry(v: { rating: number; pace: number }) {
+  function setMarketWeight(v: number) {
+    setMarketWeightState(v);
+    try {
+      localStorage.setItem("matchup_market_weight_v1", String(v));
+    } catch {
+      // ei haittaa
+    }
+  }
+  useEffect(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(CARRY_KEY) ?? "null");
+      if (v && typeof v.player === "number" && typeof v.res === "number" && typeof v.pace === "number") setCarryState(v);
+    } catch {
+      // ei haittaa
+    }
+  }, []);
+  function setCarry(v: typeof DEFAULT_CARRY) {
     setCarryState(v);
     try {
       localStorage.setItem(CARRY_KEY, JSON.stringify(v));
@@ -497,6 +521,11 @@ export default function MatchupPage() {
     return leagueNorm ? n : { ...n, teams: raw };
   }, [usePrev, players, prevRows, leagueNorm]);
   const offseason = offseasonNorm.teams;
+  const explainedMean = useMemo(() => {
+    const ts = Object.values(offseasonNorm.teams).filter((t) => canonTeam(t.team));
+    if (ts.length === 0) return { o: 0, d: 0 };
+    return { o: ts.reduce((s, t) => s + t.prevO, 0) / ts.length, d: ts.reduce((s, t) => s + t.prevD, 0) / ts.length };
+  }, [offseasonNorm]);
   // Kauden ensimmäinen ottelupäivä otteluohjelmasta. Sitä ennen kirjatut siirrot
   // ovat kesän siirtoja, jotka sisältyvät jo rosteripohjaiseen kesän muutokseen.
   const seasonStart = useMemo(() => games.reduce((m, g) => (g.date && g.date < m ? g.date : m), "9999-12-31"), [games]);
@@ -597,14 +626,57 @@ export default function MatchupPage() {
     return { r: bs.reduce((s, b) => s + (b.o + b.d) / 2, 0) / bs.length, p: bs.reduce((s, b) => s + b.p, 0) / bs.length };
   })();
 
+  // Kauden lähtötaso ennen pelattuja otteluita (regressio + kesän muutos).
+  function priorFor(team: TeamStats) {
+    const bl = blendOf(team);
+    const kpl = carry.player / 100;
+    const kres = carry.res / 100;
+    const kp = carry.pace / 100;
+    const base = usePrev ? offseason[team.team] : undefined;
+    // Pelaajista selittyvä osa liigakeskiarvoon nähden (O: + parempi hyökkäys, D: + parempi puolustus).
+    const explO = base ? base.prevO - explainedMean.o : 0;
+    const explD = base ? base.prevD - explainedMean.d : 0;
+    const resO = base ? bl.o - priorLeague.r - explO : 0;
+    const resD = base ? priorLeague.r - bl.d - explD : 0;
+    const ortgBlend = base ? priorLeague.r + kpl * explO + kres * resO : priorLeague.r + kpl * (bl.o - priorLeague.r);
+    const drtgBlend = base ? priorLeague.r - kpl * explD - kres * resD : priorLeague.r + kpl * (bl.d - priorLeague.r);
+    const paceBlend = priorLeague.p + kp * (bl.p - priorLeague.p);
+    const offO = (base?.offO ?? 0) * kpl;
+    const offD = (base?.offD ?? 0) * kpl;
+    return { ortgBlend, drtgBlend, paceBlend, resO, resD, offO, offD, net: ortgBlend + offO - (drtgBlend - offD) };
+  }
+
+  // Win totalit: markkinan implisiittinen Net = (voitot − 41) / 2.7 (≈ 2.7 voittoa / Net-piste),
+  // normalisoituna liigan keskiarvoon 0. Mallin kauden alun Net verrataan tähän.
+  const WINS_PER_NET = 2.7;
+  const winTotalView = (() => {
+    const list = teams.filter((t) => t.win_total != null && !Number.isNaN(Number(t.win_total)));
+    if (list.length < 20) return { rows: [] as { team: string; wins: number; mkt: number; model: number; diff: number }[], byTeam: {} as Record<string, number> };
+    const pri = list.map((t) => ({ t, p: priorFor(t) }));
+    const mMean = pri.reduce((s, x) => s + x.p.net, 0) / pri.length;
+    const imp = list.map((t) => (Number(t.win_total) - 41) / WINS_PER_NET);
+    const iMean = imp.reduce((s, x) => s + x, 0) / imp.length;
+    const rows = pri.map((x, i) => {
+      const model = x.p.net - mMean;
+      const mkt = imp[i] - iMean;
+      return { team: x.t.team, wins: Number(x.t.win_total), mkt, model, diff: mkt - model };
+    });
+    const byTeam: Record<string, number> = {};
+    for (const r of rows) byTeam[r.team] = r.diff;
+    return { rows, byTeam };
+  })();
+
   function finalStatsFor(team: TeamStats | undefined) {
     if (!team) return null;
-    const bl = blendOf(team);
-    const kr = carry.rating / 100;
-    const kp = carry.pace / 100;
-    const ortgBlend = priorLeague.r + kr * (bl.o - priorLeague.r);
-    const drtgBlend = priorLeague.r + kr * (bl.d - priorLeague.r);
-    const paceBlend = priorLeague.p + kp * (bl.p - priorLeague.p);
+    const pr = priorFor(team);
+    // Markkinaprior: siirretään lähtötasoa kohti win totalista johdettua Netiä
+    // (puolet hyökkäykseen, puolet puolustukseen).
+    const mktShift = (winTotalView.byTeam[team.team] ?? 0) * (marketWeight / 100);
+    const ortgBlend = pr.ortgBlend + mktShift / 2;
+    const drtgBlend = pr.drtgBlend - mktShift / 2;
+    const paceBlend = pr.paceBlend;
+    const resO = pr.resO;
+    const resD = pr.resD;
 
     const played = gamesByTeam[team.team] ?? [];
 
@@ -612,8 +684,8 @@ export default function MatchupPage() {
     // lähtötasoon ennen EWMA:a, joten se hiipuu pelien myötä samaa tahtia kuin
     // viime kauden luvut.
     const off = usePrev ? offseason[team.team] : undefined;
-    const offO = off?.offO ?? 0;
-    const offD = off?.offD ?? 0;
+    const offO = pr.offO;
+    const offD = pr.offD;
     const ortgActual = ewma(ortgBlend + offO, played.map((g) => g.ortg), alpha);
     const drtgActual = ewma(drtgBlend - offD, played.map((g) => g.drtg), alpha);
     const paceActual = ewma(paceBlend, played.map((g) => g.pace), paceAlpha);
@@ -642,6 +714,8 @@ export default function MatchupPage() {
     return {
       ortgBlend,
       drtgBlend,
+      resO,
+      resD,
       gamesPlayed: played.length,
       offO,
       offD,
@@ -1369,6 +1443,47 @@ export default function MatchupPage() {
         );
       })()}
 
+      {winTotalView.rows.length > 0 && (
+        <details style={{ ...card, padding: 14, marginBottom: 12 }}>
+          <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Malli vs. win totalit (kauden alun Net)</summary>
+          <div style={{ fontSize: 11, color: "#64748b", margin: "8px 0 10px", maxWidth: 820, lineHeight: 1.6 }}>
+            Markkinan Net = (win total − 41) / {WINS_PER_NET}, mallin Net = lähtötaso ennen pelattuja otteluita (regressio + kesän
+            muutos), molemmat liigakeskiarvoon nähden. Ero pisteinä ja voittoina: positiivinen = markkina pitää joukkuetta parempana kuin
+            malli. Isot erot (punainen ≥ 3 p ≈ 8 voittoa) kannattaa tarkistaa: puuttuuko rosterista siirto, loukkaantuminen tai minuutit —
+            vai tietääkö markkina jotain, mitä malli ei voi nähdä (tankkaus, valmentaja).
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ color: "#94a3b8", textAlign: "left" }}>
+                  {["Joukkue", "Win total", "Markkina Net", "Malli Net", "Ero (p)", "Ero (voittoa)"].map((h) => (
+                    <th key={h} style={{ padding: "4px 10px" }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {[...winTotalView.rows]
+                  .sort((x, y) => Math.abs(y.diff) - Math.abs(x.diff))
+                  .map((r) => (
+                    <tr key={r.team} style={{ borderTop: "1px solid #1f2937" }}>
+                      <td style={{ padding: "4px 10px" }}>{r.team}</td>
+                      <td style={{ padding: "4px 10px" }}>{r.wins}</td>
+                      <td style={{ padding: "4px 10px" }}>{signed(r.mkt)}</td>
+                      <td style={{ padding: "4px 10px" }}>{signed(r.model)}</td>
+                      <td style={{ padding: "4px 10px", fontWeight: 700, color: Math.abs(r.diff) >= 3 ? "#f87171" : Math.abs(r.diff) >= 1.5 ? "#fbbf24" : "#94a3b8" }}>
+                        {signed(r.diff)}
+                      </td>
+                      <td style={{ padding: "4px 10px", color: "#94a3b8" }}>{signed(r.diff * WINS_PER_NET)}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+
       {statusMsg && <div style={{ color: "#f87171", fontSize: 13, marginBottom: 12 }}>{statusMsg}</div>}
       {!usePrev && !loading && (
         <div style={{ color: "#fbbf24", fontSize: 12, marginBottom: 12 }}>
@@ -1407,19 +1522,37 @@ export default function MatchupPage() {
             <input type="range" min={0} max={100} value={blendWeight} onChange={(e) => setBlendWeight(Number(e.target.value))} style={{ width: "100%" }} />
             <div style={{ fontSize: 11, color: "#64748b" }}>Muistetaan tässä selaimessa. &quot;Coach vaihtui&quot; -joukkueet käyttävät aina vain 25-26.</div>
             <label style={{ fontSize: 12, color: "#94a3b8", display: "block", margin: "14px 0 4px" }}>
-              Kauden alun regressio — säilyy: ratingit {carry.rating} %, tempo {carry.pace} %
-              {(carry.rating !== DEFAULT_CARRY || carry.pace !== DEFAULT_PACE_CARRY) && (
-                <button onClick={() => setCarry({ rating: DEFAULT_CARRY, pace: DEFAULT_PACE_CARRY })} style={{ ...smallInput, marginLeft: 8, padding: "1px 8px", fontSize: 11, cursor: "pointer" }}>
-                  Palauta {DEFAULT_CARRY} / {DEFAULT_PACE_CARRY}
+              Kauden alun regressio — säilyy: pelaajat {carry.player} % · jäännös {carry.res} % · tempo {carry.pace} %
+              {(carry.player !== DEFAULT_CARRY.player || carry.res !== DEFAULT_CARRY.res || carry.pace !== DEFAULT_CARRY.pace) && (
+                <button onClick={() => setCarry(DEFAULT_CARRY)} style={{ ...smallInput, marginLeft: 8, padding: "1px 8px", fontSize: 11, cursor: "pointer" }}>
+                  Palauta {DEFAULT_CARRY.player} / {DEFAULT_CARRY.res} / {DEFAULT_CARRY.pace}
                 </button>
               )}
             </label>
-            <input type="range" min={30} max={100} step={5} value={carry.rating} onChange={(e) => setCarry({ ...carry, rating: Number(e.target.value) })} style={{ width: "100%" }} />
-            <input type="range" min={30} max={100} step={5} value={carry.pace} onChange={(e) => setCarry({ ...carry, pace: Number(e.target.value) })} style={{ width: "100%" }} />
+            {([
+              ["player", "Pelaajista selittyvä osa (EPM × minuutit)"],
+              ["res", "Jäännös (joukkueen luku − pelaajien osa)"],
+              ["pace", "Tempo"],
+            ] as const).map(([k, label]) => (
+              <div key={k} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 11, color: "#64748b", width: 210 }}>{label}</span>
+                <input type="range" min={0} max={100} step={5} value={carry[k]} onChange={(e) => setCarry({ ...carry, [k]: Number(e.target.value) })} style={{ flex: 1 }} />
+              </div>
+            ))}
             <div style={{ fontSize: 11, color: "#64748b" }}>
-              Viime kauden ORTG/DRTG ja tempo vedetään liigakeskiarvoa kohti ennen kesän muutoksia ja pelattuja otteluita. Datassa
-              (2024-25 → 2025-26) Net-eroista säilyi ~54 % ja tempoeroista ~50 %; ratingien oletus on korkeampi, koska rosterimuutokset
-              lasketaan erikseen. 100 % = ei regressiota (vanha tapa). Vaikutus hiipuu EWMA:n myötä pelien kertyessä.
+              Viime kauden ORTG/DRTG jaetaan kahteen osaan. Pelaajien osa kulkee pelaajien mukana siirroissa (kesän muutos) ja säilyy
+              lähes kokonaan. Jäännös on se osa joukkueen luvusta, jota pelaajien EPM ei selitä — tuuri, valmennus, tankkaus — ja se jää
+              joukkueelle, vaikka pelaajat lähtisivät, joten se regressoidaan voimakkaasti. Esim. Hornetsin 25-26 Net +4.8, josta
+              pelaajat selittävät vain noin 0 ja jäännös noin +5. Kesän muutoksiin sovelletaan samaa pelaajakerrointa. 100 / 100 = ei
+              regressiota. Vaikutus hiipuu EWMA:n myötä pelien kertyessä.
+            </div>
+            <label style={{ fontSize: 12, color: "#94a3b8", display: "block", margin: "14px 0 4px" }}>
+              Win totalien paino lähtötasossa: {marketWeight} %
+            </label>
+            <input type="range" min={0} max={100} step={10} value={marketWeight} onChange={(e) => setMarketWeight(Number(e.target.value))} style={{ width: "100%" }} />
+            <div style={{ fontSize: 11, color: "#64748b" }}>
+              0 % = malli yksin (win totalit vain vertailussa). Esim. 50 % siirtää jokaisen joukkueen kauden alun Netiä puoliväliin kohti
+              markkinan win totalista johdettua Netiä. Vaikutus hiipuu EWMA:n myötä. Win totalit syötetään Teams-sivulla.
             </div>
           </div>
           <div>
@@ -1492,7 +1625,7 @@ export default function MatchupPage() {
             <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ color: "#94a3b8", textAlign: "left" }}>
-                  {["Joukkue", "Lähtötaso O/D (regressoitu)", "Kesän muutos O/D", "Pelattu", "EWMA O/D", usePrev ? "Kauden siirrot O/D" : "Siirrot O/D", "Kokoonpano O/D", "Final ORTG", "Final DRTG", "Pace", "HCA"].map((h) => (
+                  {["Joukkue", "Lähtötaso O/D (regressoitu)", "Jäännös O/D (ennen regr.)", "Kesän muutos O/D", "Pelattu", "EWMA O/D", usePrev ? "Kauden siirrot O/D" : "Siirrot O/D", "Kokoonpano O/D", "Final ORTG", "Final DRTG", "Pace", "HCA"].map((h) => (
                     <th key={h} style={{ padding: 6 }}>
                       {h}
                     </th>
@@ -1508,6 +1641,9 @@ export default function MatchupPage() {
                     <td style={{ padding: 6 }}>{t.team}</td>
                     <td style={{ padding: 6, color: "#64748b" }}>
                       {f.ortgBlend.toFixed(1)} / {f.drtgBlend.toFixed(1)}
+                    </td>
+                    <td style={{ padding: 6, color: "#64748b" }}>
+                      {usePrev ? `${signed(f.resO, 1)} / ${signed(f.resD, 1)}` : "—"}
                     </td>
                     <td style={{ padding: 6 }}>
                       {usePrev ? `${signed(f.offO, 2)} / ${signed(f.offD, 2)}` : "—"}

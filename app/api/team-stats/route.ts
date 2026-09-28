@@ -38,6 +38,7 @@ export async function POST(request: Request) {
     "ortg_2526",
     "drtg_2526",
     "home_adv",
+    "win_total",
   ] as const;
 
   const update: Record<string, any> = {};

@@ -14,9 +14,10 @@ type TeamStats = {
   drtg_2526: number | null;
   coach_change: boolean | null;
   home_adv: number | null;
+  win_total: number | null;
 };
 
-type NumField = "ortg_2425" | "drtg_2425" | "pace_2425" | "ortg_2526" | "drtg_2526" | "pace_2526" | "home_adv";
+type NumField = "ortg_2425" | "drtg_2425" | "pace_2425" | "ortg_2526" | "drtg_2526" | "pace_2526" | "home_adv" | "win_total";
 type SortKey = "team" | "net_2425" | "net_2526" | "net_change" | NumField;
 
 const ALL_TEAMS = Array.from(new Set(Object.values(TEAM_NAME_BY_ABBR))).sort();
@@ -32,6 +33,7 @@ function emptyRow(team: string): TeamStats {
     drtg_2526: null,
     coach_change: false,
     home_adv: null,
+    win_total: null,
   };
 }
 
@@ -239,7 +241,7 @@ export default function TeamsPage() {
                   Kausi 24-25
                 </th>
                 <th />
-                <th colSpan={3} />
+                <th colSpan={4} />
               </tr>
               <tr style={{ textAlign: "left" }}>
                 <th style={{ padding: "6px 4px", color: "#64748b" }}>#</th>
@@ -255,6 +257,7 @@ export default function TeamsPage() {
                 <SortHeader k="net_change" label="Δ Net" title="Net Ratingin muutos 24-25 → 25-26" />
                 <th style={{ padding: "6px 4px", color: "#94a3b8" }}>Coach</th>
                 <SortHeader k="home_adv" label="HCA" />
+                <SortHeader k="win_total" label="Win total" title="Markkinan runkosarjan voittoraja 26-27 (Matchup vertaa malliin)" />
                 <th />
               </tr>
             </thead>
@@ -295,6 +298,7 @@ export default function TeamsPage() {
                       />
                     </td>
                     {numInput(team, "home_adv", row.home_adv)}
+                    {numInput(team, "win_total", row.win_total)}
                     <td style={{ padding: 2 }}>
                       <button
                         onClick={() => saveTeam(team)}
