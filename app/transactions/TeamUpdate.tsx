@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
 import { parseTeamTransactions, normalizePlayerName, type ParsedMove } from "@/lib/parseTransactions";
 import { ROOKIE_PRESETS } from "@/lib/rookies";
-import { TEAM_GAMES, looseKey, type PrevRow } from "@/lib/prevSeason";
+import { TEAM_GAMES, looseKey, computeOffseason, leagueNormalize, type PrevRow } from "@/lib/prevSeason";
 
 export type DbPlayer = {
   id: string;
@@ -215,9 +215,10 @@ export default function TeamUpdate({
 
   const newRoster = useMemo(() => {
     const staying = teamPlayers.filter((p) => !(p.id in departures));
+    // Jo tähän joukkueeseen tallennettu tulija näkyy rosterissa, ei toista kertaa tulijana.
     const incoming = Object.keys(additions)
       .map((id) => byId.get(id))
-      .filter((p): p is DbPlayer => !!p);
+      .filter((p): p is DbPlayer => !!p && !sameTeam(p.team, team) && !staying.some((x) => x.id === p.id));
     return [...staying, ...incoming, ...rookies];
   }, [teamPlayers, departures, additions, byId, rookies]);
   const isRookie = (p: DbPlayer) => p.id.startsWith("new:") || !!rookieMark[p.id];
@@ -311,6 +312,28 @@ export default function TeamUpdate({
     return { o: newO - oldO + markO, d: newD - oldD + markD };
   }, [teamPlayers, newRoster, minutes, rookieMark, departures]);
 
+  // Kesän muutos täsmälleen kuten Matchup laskee sen (rosteri − kauden 25-26 pohja,
+  // skaalattu 240:een, liigakeskiarvo vähennetty) — luonnoksen muutokset mukana.
+  const modelChange = useMemo(() => {
+    if (prevRows.length === 0) return null;
+    const hyp: DbPlayer[] = players.map((p) => {
+      if (p.id in departures) return { ...p, team: departures[p.id], mpg_base: destMinOf(p, departures[p.id]) };
+      if (p.id in additions) return { ...p, team, mpg_base: minOf(p) };
+      if (sameTeam(p.team, team) && minutes[p.id] !== undefined) return { ...p, mpg_base: minutes[p.id] };
+      return p;
+    });
+    for (const r of rookies) hyp.push({ ...r, mpg_base: minOf(r) });
+    const { teams } = leagueNormalize(computeOffseason(hyp as any, prevRows));
+    const t = Object.values(teams).find((x) => sameTeam(x.team, team));
+    return t ? { o: t.offO, d: t.offD } : null;
+  }, [players, departures, additions, minutes, destMinutes, rookies, prevRows, team]);
+  // Pelaajan pohja TÄSSÄ joukkueessa (25-26 minuutit tässä joukkueessa / 82).
+  function baseOnTeam(p: DbPlayer): number {
+    return findPrev(p.name)
+      .filter((r) => sameTeam(r.team, team))
+      .reduce((a, r) => a + r.min_total / TEAM_GAMES, 0);
+  }
+
   const searchResults = useMemo(() => {
     if (!search.trim()) return [];
     const q = normalizePlayerName(search);
@@ -338,7 +361,7 @@ export default function TeamUpdate({
     }
     for (const id of Object.keys(additions)) {
       const p = byId.get(id);
-      if (!p) continue;
+      if (!p || sameTeam(p.team, team)) continue; // jo tallennettu
       list.push({ playerId: id, newTeam: team, newMpg: minOf(p), label: `${p.name} ${p.team} → ${team} (${minOf(p)} min)` });
     }
     for (const r of rookies) {
@@ -362,6 +385,7 @@ export default function TeamUpdate({
     setStatus(null);
     localStorage.setItem("cron_secret", secret);
     const failed: string[] = [];
+    const doneIds = new Set<string>();
     for (const op of ops) {
       try {
         let playerId = op.playerId;
@@ -386,6 +410,8 @@ export default function TeamUpdate({
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
           failed.push(`${op.label}: ${data.error ?? res.status}`);
+        } else {
+          doneIds.add(op.playerId);
         }
       } catch (e: any) {
         failed.push(`${op.label}: ${e?.message ?? "virhe"}`);
@@ -398,7 +424,15 @@ export default function TeamUpdate({
       setPaste("");
       setStatus(`${team} päivitetty: ${ops.length} muutosta kirjattu.`);
     } else {
-      setStatus(`Virhe: ${failed.length}/${ops.length} epäonnistui — ${failed.join("; ")}`);
+      // Onnistuneet pois luonnoksesta, jotta niitä ei kirjata tai näytetä toiseen kertaan.
+      const drop = <T,>(rec: Record<string, T>) => Object.fromEntries(Object.entries(rec).filter(([id]) => !doneIds.has(id)));
+      setAdditions((prev) => drop(prev));
+      setDepartures((prev) => drop(prev));
+      setMinutes((prev) => drop(prev));
+      setDestMinutes((prev) => drop(prev));
+      setRookieMark((prev) => drop(prev));
+      setRookies((prev) => prev.filter((r) => !doneIds.has(r.id)));
+      setStatus(`Virhe: ${failed.length}/${ops.length} epäonnistui (${ops.length - failed.length} tallennettu) — ${failed.join("; ")}`);
     }
   }
 
@@ -518,7 +552,15 @@ export default function TeamUpdate({
           </div>
         </div>
         <div style={{ fontSize: 12, color: "#94a3b8", margin: "4px 0 10px" }}>
-          Arvioitu muutos: O-EPM <strong style={{ color: impact.o >= 0 ? "#4ade80" : "#f87171" }}>{signed(impact.o)}</strong> · D-EPM{" "}
+          {modelChange && (
+            <div style={{ marginBottom: 2 }}>
+              Kesän muutos (Matchup): Net{" "}
+              <strong style={{ color: modelChange.o + modelChange.d >= 0 ? "#4ade80" : "#f87171" }}>{signed(modelChange.o + modelChange.d)}</strong>{" "}
+              (O {signed(modelChange.o)} · D {signed(modelChange.d)}){" "}
+              <span style={{ color: "#64748b" }}>— rosteri vs. kauden 25-26 pohja, liigakeskiarvo vähennetty</span>
+            </div>
+          )}
+          Tämän luonnoksen muutos: O-EPM <strong style={{ color: impact.o >= 0 ? "#4ade80" : "#f87171" }}>{signed(impact.o)}</strong> · D-EPM{" "}
           <strong style={{ color: impact.d >= 0 ? "#4ade80" : "#f87171" }}>{signed(impact.d)}</strong>{" "}
           <span style={{ color: "#64748b" }}>(positiivinen D parantaa puolustusta)</span>
         </div>
@@ -585,7 +627,7 @@ export default function TeamUpdate({
               <th style={{ padding: 4 }}>Pelaaja</th>
               <th style={{ padding: 4 }}>O / D</th>
               <th style={{ padding: 4 }}>Minuutit</th>
-              <th style={{ padding: 4 }}>Vaikutus</th>
+              <th style={{ padding: 4 }} title="(O+D) × (minuutit − pohja tässä joukkueessa) / 48">Muutos pohjaan</th>
               <th style={{ padding: 4 }}></th>
             </tr>
           </thead>
@@ -625,9 +667,18 @@ export default function TeamUpdate({
                       </span>
                     )}
                   </td>
-                  <td style={{ padding: 4, color: (p.oepm + p.depm) >= 0 ? "#4ade80" : "#f87171" }}>
-                    {signed(((p.oepm + p.depm) * m) / 48)}
-                  </td>
+                  {(() => {
+                    const base = baseOnTeam(p);
+                    const v = ((p.oepm + p.depm) * (m - base)) / 48;
+                    return (
+                      <td
+                        style={{ padding: 4, color: Math.abs(v) < 0.005 ? "#64748b" : v > 0 ? "#4ade80" : "#f87171" }}
+                        title={`pohja tässä joukkueessa ${base.toFixed(1)} min, nyt ${m} min`}
+                      >
+                        {Math.abs(v) < 0.005 ? "0.00" : signed(v)}
+                      </td>
+                    );
+                  })()}
                   <td style={{ padding: 4, textAlign: "right" }}>
                     {p.id.startsWith("new:") ? (
                       <button

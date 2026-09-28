@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
 import TeamUpdate from "./TeamUpdate";
-import type { PrevRow } from "@/lib/prevSeason";
+import { computeOffseason, leagueNormalize, canonTeam, type PrevRow } from "@/lib/prevSeason";
 
 type DbPlayer = {
   id: string;
@@ -246,16 +246,6 @@ export default function TransactionsPage() {
     await Promise.all([loadPlayers(), loadTransactions()]);
     setRosterSaving(false);
   }
-
-  const teamNetImpact = useMemo(() => {
-    const byTeam: Record<string, { o: number; d: number }> = {};
-    for (const t of transactions) {
-      const entry = (byTeam[t.team] ??= { o: 0, d: 0 });
-      entry.o += Number(t.delta_o) || 0;
-      entry.d += Number(t.delta_d) || 0;
-    }
-    return byTeam;
-  }, [transactions]);
 
   return (
     <div style={{ padding: 24, fontFamily: "system-ui", background: "#0f172a", color: "#e2e8f0", minHeight: "100vh" }}>
@@ -622,27 +612,43 @@ export default function TransactionsPage() {
       </>
       )}
 
-      <h2 style={{ fontSize: 16, marginTop: 32, marginBottom: 8 }}>Joukkueiden nettovaikutus transaktioista</h2>
-      {loadingTx ? (
-        <div style={{ color: "#64748b", fontSize: 13 }}>Ladataan...</div>
-      ) : Object.keys(teamNetImpact).length === 0 ? (
-        <div style={{ color: "#64748b", fontSize: 13 }}>Ei vielä kirjattuja transaktioita.</div>
-      ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 8, maxWidth: 1000, marginBottom: 32 }}>
-          {Object.entries(teamNetImpact)
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([team, delta]) => (
-              <div key={team} style={{ fontSize: 12, border: "1px solid #334155", borderRadius: 6, padding: "6px 10px" }}>
-                <div style={{ fontWeight: 600, marginBottom: 2 }}>{team}</div>
-                <div style={{ color: "#94a3b8" }}>
-                  ORTG {delta.o >= 0 ? "+" : ""}
-                  {delta.o.toFixed(2)} / DRTG {delta.d >= 0 ? "+" : ""}
-                  {delta.d.toFixed(2)}
-                </div>
-              </div>
-            ))}
-        </div>
-      )}
+      <h2 style={{ fontSize: 16, marginTop: 32, marginBottom: 4 }}>Kesän muutos joukkueittain</h2>
+      {(() => {
+        if (loadingPlayers) return <div style={{ color: "#64748b", fontSize: 13 }}>Ladataan...</div>;
+        if (prevRows.length === 0)
+          return <div style={{ color: "#fbbf24", fontSize: 13 }}>Kauden 25-26 minuutit puuttuvat (setup_season_baseline.sql).</div>;
+        const raw = computeOffseason(players as any, prevRows);
+        const { teams, meanO, meanD } = leagueNormalize(raw);
+        const list = Object.values(teams)
+          .filter((t) => canonTeam(t.team))
+          .sort((x, y) => y.offO + y.offD - (x.offO + x.offD));
+        const sg = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(2)}`;
+        return (
+          <>
+            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 10, maxWidth: 900 }}>
+              Sama luku, jota Matchup käyttää: nykyinen rosteri (EPM × minuutit, skaalattu 240:een) − kauden 25-26 pohja,
+              miinus liigan keskimääräinen muutos (O {sg(meanO)}, D {sg(meanD)}). Net-summa on aina 0, joten puolet joukkueista
+              heikkenee suhteessa muihin. D positiivinen = parempi puolustus (DRTG laskee).
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 8, maxWidth: 1000, marginBottom: 32 }}>
+              {list.map((t) => {
+                const net = t.offO + t.offD;
+                return (
+                  <div key={t.team} style={{ fontSize: 12, border: "1px solid #334155", borderRadius: 6, padding: "6px 10px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 600, marginBottom: 2 }}>
+                      <span>{t.team}</span>
+                      <span style={{ color: Math.abs(net) < 0.05 ? "#94a3b8" : net > 0 ? "#4ade80" : "#f87171" }}>{sg(net)}</span>
+                    </div>
+                    <div style={{ color: "#94a3b8" }}>
+                      O {sg(t.offO)} / D {sg(t.offD)} · {t.roleMin.toFixed(0)} min
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        );
+      })()}
 
       <h2 style={{ fontSize: 16, marginBottom: 8 }}>Transaktioloki</h2>
       {loadingPlayers || loadingTx ? (
@@ -658,8 +664,8 @@ export default function TransactionsPage() {
                 <th style={{ padding: 4 }}>Pelaaja</th>
                 <th style={{ padding: 4 }}>Joukkue</th>
                 <th style={{ padding: 4 }}>Suunta</th>
-                <th style={{ padding: 4 }}>Δ O</th>
-                <th style={{ padding: 4 }}>Δ D</th>
+                <th style={{ padding: 4 }} title="Kirjaushetken arvio, ei käytetä laskennassa">Δ O*</th>
+                <th style={{ padding: 4 }} title="Kirjaushetken arvio, ei käytetä laskennassa">Δ D*</th>
               </tr>
             </thead>
             <tbody>
