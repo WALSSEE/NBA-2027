@@ -288,6 +288,27 @@ export default function MatchupPage() {
   // Kausiblendi: oletus 100 % 25-26, oma säätö muistetaan selaimessa.
   const [blendWeight, setBlendWeightState] = useState(DEFAULT_BLEND);
   const [carry, setCarryState] = useState(DEFAULT_CARRY);
+  // Kauden alun tempotason korjaus (poss): lisätään jokaisen joukkueen lähtötempoon,
+  // hiipuu EWMA:n myötä. Kauden alussa tempo on ollut ~1.2–1.5 poss kauden keskiarvoa
+  // korkeampi (2024-25 ja 2025-26), ja liigan pisteet ovat nousseet kausi kaudelta.
+  const [paceShift, setPaceShiftState] = useState(0);
+  useEffect(() => {
+    try {
+      const v = Number(localStorage.getItem("matchup_pace_shift_v1"));
+      if (Number.isFinite(v) && Math.abs(v) <= 10) setPaceShiftState(v);
+    } catch {
+      // ei haittaa
+    }
+  }, []);
+  function setPaceShift(v: number) {
+    const r = Math.round(v * 10) / 10;
+    setPaceShiftState(r);
+    try {
+      localStorage.setItem("matchup_pace_shift_v1", String(r));
+    } catch {
+      // ei haittaa
+    }
+  }
   // Win totalien paino kauden alun lähtötasossa (0 = vain vertailu).
   const [marketWeight, setMarketWeightState] = useState(0);
   useEffect(() => {
@@ -517,8 +538,8 @@ export default function MatchupPage() {
   };
   // Kauden lähtötaso (regressio + kesän muutos + win totalit) — sama kuin Teams-sivulla.
   const pre = useMemo(
-    () => computePreseason(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight }),
-    [teams, players, prevRows, blendWeight, carry, leagueNorm, marketWeight]
+    () => computePreseason(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight, paceShift }),
+    [teams, players, prevRows, blendWeight, carry, leagueNorm, marketWeight, paceShift]
   );
   const offseasonNorm = { meanO: pre.meanO, meanD: pre.meanD };
   const offseason = pre.offseason;
@@ -1255,6 +1276,10 @@ export default function MatchupPage() {
             const d = (r: typeof x) => (r.pr && r.lines?.spread ? Math.abs(r.pr.margin + r.lines.spread.point) : -1);
             return d(y) - d(x);
           });
+        const totGaps = rows.filter((r) => r.pr && r.lines?.total).map((r) => r.lines!.total!.point - r.pr!.total);
+        const totGap = totGaps.length ? totGaps.reduce((a, x) => a + x, 0) / totGaps.length : null;
+        const spGaps = rows.filter((r) => r.pr && r.lines?.spread).map((r) => -r.pr!.margin - r.lines!.spread!.point);
+        const spMae = spGaps.length ? spGaps.reduce((a, x) => a + Math.abs(x), 0) / spGaps.length : null;
         const th = { padding: "6px 8px", fontWeight: 600 as const };
         const td = { padding: "6px 8px", whiteSpace: "nowrap" as const };
         return (
@@ -1289,6 +1314,24 @@ export default function MatchupPage() {
                     {d}
                   </button>
                 ))}
+              </div>
+            )}
+            {totGap != null && (
+              <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 8, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <span>
+                  Totalit: markkina keskimäärin <strong style={{ color: Math.abs(totGap) >= 2 ? "#fbbf24" : "#e2e8f0" }}>{totGap >= 0 ? "+" : ""}{totGap.toFixed(1)}</strong> p mallia
+                  {totGap >= 0 ? " korkeammalla" : " matalammalla"} ({totGaps.length} peliä)
+                  {spMae != null && <> · tasoituksen keskimääräinen ero {spMae.toFixed(1)} p</>}
+                </span>
+                {Math.abs(totGap) >= 0.5 && (
+                  <button
+                    onClick={() => setPaceShift(paceShift + totGap / (2 * (leagueAvg / 100)))}
+                    style={{ ...smallInput, padding: "3px 10px", cursor: "pointer" }}
+                    title="Muuttaa kauden alun tempotasoa niin, että mallin totalit ovat keskimäärin markkinan tasolla (yksittäisten pelien erot jäävät)"
+                  >
+                    Korjaa tempotaso ({paceShift >= 0 ? "+" : ""}{paceShift.toFixed(1)} → {(paceShift + totGap / (2 * (leagueAvg / 100)) >= 0 ? "+" : "")}{(paceShift + totGap / (2 * (leagueAvg / 100))).toFixed(1)} poss)
+                  </button>
+                )}
               </div>
             )}
             {rows.length > 0 && (
@@ -1588,6 +1631,12 @@ export default function MatchupPage() {
             <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>B2B:n tempovaikutus (poss / B2B-joukkue)</label>
             <input type="number" step="0.05" value={b2bPaceAdj} onChange={(e) => setB2bPaceAdj(parseFloat(e.target.value) || 0)} style={{ ...smallInput, width: 70, marginBottom: 4 }} />
             <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>Regressio: −0.45 per B2B-joukkue. 3 peliä / 4 pv ei vaikuta tempoon.</div>
+            <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>Kauden alun tempotaso (poss, kaikille joukkueille)</label>
+            <input type="number" step="0.1" value={paceShift} onChange={(e) => setPaceShift(parseFloat(e.target.value) || 0)} style={{ ...smallInput, width: 70, marginBottom: 4 }} />
+            <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>
+              Nostaa kaikkien lähtötempoa (hiipuu pelien myötä). Loka–marraskuussa tempo on ollut ~1.2–1.5 poss kauden keskiarvoa
+              korkeampi. Kalibroi Kierros-näkymän napilla markkinan totaleihin.
+            </div>
             <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>Väsymysvähennys: B2B / 3 peliä 4 pv (pistettä)</label>
             <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
               <input type="number" step="0.5" value={b2bPenalty} onChange={(e) => setB2bPenalty(parseFloat(e.target.value) || 0)} style={{ ...smallInput, width: 70 }} />

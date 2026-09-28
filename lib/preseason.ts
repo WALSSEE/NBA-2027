@@ -22,6 +22,7 @@ export type PreSettings = {
   carry: { player: number; res: number; pace: number }; // %
   leagueNorm: boolean;
   marketWeight: number; // 0–100
+  paceShift?: number; // kauden alun tempotason korjaus (possessioita, kaikille joukkueille)
 };
 export const DEFAULT_PRE_SETTINGS: PreSettings = {
   blendWeight: 100,
@@ -113,7 +114,7 @@ export function computePreseason(
     const resD = base ? L - bl.d - explD : 0;
     const ortgBlend = base ? L + kpl * explO + kres * resO : L + kpl * (bl.o - L);
     const drtgBlend = base ? L - kpl * explD - kres * resD : L + kpl * (bl.d - L);
-    const paceBlend = LP + kp * (bl.p - LP);
+    const paceBlend = LP + kp * (bl.p - LP) + (s.paceShift ?? 0);
     const offO = (base?.offO ?? 0) * kpl;
     const offD = (base?.offD ?? 0) * kpl;
     byTeam[t.team] = {
