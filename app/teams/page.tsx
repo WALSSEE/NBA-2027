@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
-import { computePreseason, loadPreSettings, DEFAULT_PRE_SETTINGS, type PreSettings } from "@/lib/preseason";
+import { computePreseason, loadPreSettings, loadPreSettingsRemote, DEFAULT_PRE_SETTINGS, type PreSettings } from "@/lib/preseason";
 import type { PrevRow } from "@/lib/prevSeason";
 
 type TeamStats = {
@@ -75,6 +75,7 @@ export default function TeamsPage() {
   useEffect(() => {
     setSecret(localStorage.getItem("cron_secret") ?? "");
     setPreSettings(loadPreSettings());
+    loadPreSettingsRemote().then(setPreSettings);
     load();
     (async () => {
       try {
@@ -288,8 +289,8 @@ export default function TeamsPage() {
         <strong style={{ color: "#93c5fd" }}>Preseason 26-27</strong> = joukkueen lähtötaso ensimmäiseen otteluun: kausiblendi, regressio
         (pelaajat {preSettings.carry.player} % · jäännös {preSettings.carry.res} %), kesän muutos Transactionsista
         {preSettings.leagueNorm ? " (liigakeskiarvo vähennetty)" : ""}
-        {preSettings.marketWeight > 0 ? ` ja win totalit ${preSettings.marketWeight} %` : ""}. Asetukset tulevat Matchupista (tässä
-        selaimessa). <strong>Kesän muutos</strong> on pelaajakertoimella ({preSettings.carry.player} %) skaalattu, D positiivinen = parempi
+        {preSettings.marketWeight > 0 ? ` ja win totalit ${preSettings.marketWeight} %` : ""}. Asetukset tulevat Matchupista
+        (tallennettu tietokantaan). <strong>Kesän muutos</strong> on pelaajakertoimella ({preSettings.carry.player} %) skaalattu, D positiivinen = parempi
         puolustus. Pelattujen otteluiden EWMA ei ole mukana.
         {!pre && " Ladataan pelaajia..."}
       </div>

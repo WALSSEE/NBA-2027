@@ -194,3 +194,22 @@ export function calibrateCarry(
   grid.sort((a, b) => a.rmse - b.rmse);
   return { current, best: grid[0] ?? null, grid };
 }
+
+// Asetukset tietokannasta (app_settings.model), paikallinen selain varalla.
+export async function loadPreSettingsRemote(): Promise<PreSettings> {
+  const local = loadPreSettings();
+  try {
+    const j = await fetch("/api/settings").then((r) => r.json());
+    const m = j?.settings?.model;
+    if (!m) return local;
+    return {
+      blendWeight: typeof m.blendWeight === "number" ? m.blendWeight : local.blendWeight,
+      carry: m.carry && typeof m.carry.player === "number" ? m.carry : local.carry,
+      leagueNorm: typeof m.leagueNorm === "boolean" ? m.leagueNorm : local.leagueNorm,
+      marketWeight: typeof m.marketWeight === "number" ? m.marketWeight : local.marketWeight,
+      paceShift: typeof m.paceShift === "number" ? m.paceShift : local.paceShift,
+    };
+  } catch {
+    return local;
+  }
+}

@@ -66,6 +66,7 @@ type AbsenceInfo = { out: boolean; embedded: number; missed: number; prevShare: 
 
 const LEAGUE_AVG_PACE = 100;
 const DEFAULT_BLEND = 100;
+const DEFAULT_ALPHA = 0.05;
 // Kauden alun regressio: viime kauden luvuista säilyy vain osa (NBA 2024-25 -> 2025-26:
 // Net ~54 %, tempo ~50 %). Rosterimuutokset lasketaan erikseen, joten oletus 70 %.
 // Joukkueen viime kauden luku jaetaan kahteen osaan:
@@ -343,7 +344,9 @@ export default function MatchupPage() {
       // ei haittaa
     }
   }
-  const [alpha, setAlpha] = useState(0.15);
+  // Ratingien EWMA-α: 0.05 (~20 pelin muisti) oli paras 2024-26 backtestissä sekä tasoitukselle
+  // että totalille; 0.15 ylireagoi yksittäisiin peleihin (totalit liian matalia heikoille hyökkäyksille).
+  const [alpha, setAlpha] = useState(DEFAULT_ALPHA);
   const [marginSd, setMarginSd] = useState(DEFAULT_MARGIN_SD);
   const [totalSd, setTotalSd] = useState(DEFAULT_TOTAL_SD);
 
@@ -427,6 +430,39 @@ export default function MatchupPage() {
   // ja valitut aloittajat per joukkue.
   const [gameMin, setGameMin] = useState<Record<string, number>>({});
   const [secret, setSecretState] = useState("");
+  // --- Mallin asetukset tietokantaan (app_settings.model): samat kaikilla laitteilla ---
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [settingsInfo, setSettingsInfo] = useState<string | null>(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const j = await fetch("/api/settings").then((r) => r.json());
+        if (j.error) setSettingsInfo(`Asetuksia ei saatu tietokannasta: ${j.error}`);
+        const m = j?.settings?.model;
+        if (m) {
+          if (typeof m.blendWeight === "number") setBlendWeight(m.blendWeight);
+          if (m.carry && typeof m.carry.player === "number") setCarry(m.carry);
+          if (typeof m.leagueNorm === "boolean") setLeagueNorm(m.leagueNorm);
+          if (typeof m.marketWeight === "number") setMarketWeight(m.marketWeight);
+          if (typeof m.paceShift === "number") setPaceShift(m.paceShift);
+          if (typeof m.alpha === "number") setAlpha(m.alpha);
+          if (typeof m.paceAlpha === "number") setPaceAlpha(m.paceAlpha);
+          if (m.paceMethod === "excel" || m.paceMethod === "additive" || m.paceMethod === "average") setPaceMethod(m.paceMethod);
+          if (typeof m.b2bPaceAdj === "number") setB2bPaceAdj(m.b2bPaceAdj);
+          if (typeof m.b2bPenalty === "number") setB2bPenalty(m.b2bPenalty);
+          if (typeof m.threeInFourPenalty === "number") setThreeInFourPenalty(m.threeInFourPenalty);
+          if (typeof m.marginSd === "number") setMarginSd(m.marginSd);
+          if (typeof m.totalSd === "number") setTotalSd(m.totalSd);
+          setSettingsInfo("Asetukset ladattu tietokannasta.");
+        }
+      } catch {
+        setSettingsInfo("Asetuksia ei saatu tietokannasta — käytetään tämän selaimen asetuksia.");
+      } finally {
+        setSettingsLoaded(true);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   useEffect(() => {
     try {
@@ -536,6 +572,29 @@ export default function MatchupPage() {
     const k = t ? minuteScale[t] ?? 1 : 1;
     return Math.round(rawBaseMin(p) * k * 10) / 10;
   };
+  const modelSettings = {
+    blendWeight, carry, leagueNorm, marketWeight, paceShift, alpha, paceAlpha, paceMethod,
+    b2bPaceAdj, b2bPenalty, threeInFourPenalty, marginSd, totalSd,
+  };
+  const modelSettingsJson = JSON.stringify(modelSettings);
+  useEffect(() => {
+    if (!settingsLoaded || !secret) return;
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+          body: JSON.stringify({ key: "model", value: JSON.parse(modelSettingsJson) }),
+        });
+        const j = await res.json().catch(() => ({}));
+        setSettingsInfo(res.ok ? `Asetukset tallennettu tietokantaan ${new Date().toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" })}.` : `Asetusten tallennus epäonnistui: ${j.error ?? res.status}`);
+      } catch (e: any) {
+        setSettingsInfo(`Asetusten tallennus epäonnistui: ${e?.message ?? e}`);
+      }
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [modelSettingsJson, settingsLoaded, secret]);
+
   // Kauden lähtötaso (regressio + kesän muutos + win totalit) — sama kuin Teams-sivulla.
   const pre = useMemo(
     () => computePreseason(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight, paceShift }),
@@ -1538,7 +1597,13 @@ export default function MatchupPage() {
 
       {/* Asetukset ja erittely */}
       <details style={{ ...card, padding: 14, marginBottom: 12 }}>
-        <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Mallin asetukset</summary>
+        <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+          Mallin asetukset{" "}
+          <span style={{ fontWeight: 400, fontSize: 11, color: settingsInfo?.includes("epäonnistui") || settingsInfo?.includes("ei saatu") ? "#f87171" : "#64748b" }}>
+            {settingsInfo ?? ""}
+            {!secret && " · Anna CRON_SECRET, niin muutokset tallentuvat tietokantaan (muuten vain tähän selaimeen)."}
+          </span>
+        </summary>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 20, marginTop: 14 }}>
           <div>
             <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>
@@ -1589,7 +1654,16 @@ export default function MatchupPage() {
             <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>
               Pelattujen otteluiden paino ORTG/DRTG (α): {alpha.toFixed(2)} (~{Math.round(1 / alpha)} pelin muisti)
             </label>
-            <input type="range" min={0.05} max={0.5} step={0.01} value={alpha} onChange={(e) => setAlpha(Number(e.target.value))} style={{ width: "100%" }} />
+            <input type="range" min={0.02} max={0.3} step={0.01} value={alpha} onChange={(e) => setAlpha(Number(e.target.value))} style={{ width: "100%" }} />
+            <div style={{ fontSize: 11, color: "#64748b" }}>
+              Backtest 2024-26: 0.03–0.05 paras sekä tasoitukselle että totalille. 0.15 ylireagoi yksittäisiin peleihin — mm. heikkojen
+              hyökkäysten totalit jäivät ~5 p liian mataliksi.
+              {alpha !== DEFAULT_ALPHA && (
+                <button onClick={() => setAlpha(DEFAULT_ALPHA)} style={{ ...smallInput, marginLeft: 6, padding: "1px 8px", fontSize: 11, cursor: "pointer" }}>
+                  Palauta {DEFAULT_ALPHA}
+                </button>
+              )}
+            </div>
             <label style={{ fontSize: 12, color: "#94a3b8", display: "flex", gap: 6, alignItems: "center", marginTop: 14 }}>
               <input type="checkbox" checked={leagueNorm} onChange={(e) => setLeagueNorm(e.target.checked)} />
               Kesän muutos liigakeskiarvoon nähden
