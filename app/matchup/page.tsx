@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { headshotUrl, initials, lastName, teamLogoUrl } from "@/lib/nbaAssets";
-import { fairOdds, gameProbabilities, pct } from "@/lib/probability";
+import { fairOdds, gameProbabilities, normCdf, pct } from "@/lib/probability";
+import { consensus, bestPrice, usGameDate, type OddsEvent, type BookLines } from "@/lib/odds";
 import { computeOffseason, leagueNormalize, teamMinuteScale, canonTeam, type PrevRow } from "@/lib/prevSeason";
 
 type TeamStats = {
@@ -63,6 +64,11 @@ type AbsenceInfo = { out: boolean; embedded: number; missed: number; prevShare: 
 
 const LEAGUE_AVG_PACE = 100;
 const DEFAULT_BLEND = 100;
+// Kauden alun regressio: viime kauden luvuista säilyy vain osa (NBA 2024-25 -> 2025-26:
+// Net ~54 %, tempo ~50 %). Rosterimuutokset lasketaan erikseen, joten oletus 70 %.
+const DEFAULT_CARRY = 70;
+const DEFAULT_PACE_CARRY = 50;
+const CARRY_KEY = "matchup_carry_v1";
 const BLEND_KEY = "matchup_blend_weight_v1";
 const HOME_COLOR = "#60a5fa";
 const AWAY_COLOR = "#f59e0b";
@@ -80,11 +86,15 @@ const FATIGUE_LABEL: Record<Fatigue, string> = { none: "Levännyt", "3in4": "3 p
 // Ottelun tempo joukkueiden pacejen perusteella.
 type PaceMethod = "excel" | "additive" | "average";
 const PACE_LABEL: Record<PaceMethod, string> = {
+  additive: "Additiivinen: koti + vieras − liiga (suositus)",
   excel: "Excel: nopeampi 60 % + hitaampi 40 %",
-  additive: "Additiivinen: koti + vieras − liiga",
   average: "Keskiarvo",
 };
-const PACE_KEY = "matchup_pace_method_v1";
+// v2: oletus vaihdettu additiiviseen (regressio 2024-26, 2460 ottelua).
+const PACE_KEY = "matchup_pace_method_v2";
+const PACE_ALPHA_KEY = "matchup_pace_alpha_v1";
+const DEFAULT_PACE_ALPHA = 0.08;
+const DEFAULT_B2B_PACE = -0.45;
 
 
 function addDays(date: string, days: number): string {
@@ -270,6 +280,23 @@ export default function MatchupPage() {
 
   // Kausiblendi: oletus 100 % 25-26, oma säätö muistetaan selaimessa.
   const [blendWeight, setBlendWeightState] = useState(DEFAULT_BLEND);
+  const [carry, setCarryState] = useState({ rating: DEFAULT_CARRY, pace: DEFAULT_PACE_CARRY });
+  useEffect(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(CARRY_KEY) ?? "null");
+      if (v && typeof v.rating === "number" && typeof v.pace === "number") setCarryState(v);
+    } catch {
+      // ei haittaa
+    }
+  }, []);
+  function setCarry(v: { rating: number; pace: number }) {
+    setCarryState(v);
+    try {
+      localStorage.setItem(CARRY_KEY, JSON.stringify(v));
+    } catch {
+      // ei haittaa
+    }
+  }
   const [alpha, setAlpha] = useState(0.15);
   const [marginSd, setMarginSd] = useState(DEFAULT_MARGIN_SD);
   const [totalSd, setTotalSd] = useState(DEFAULT_TOTAL_SD);
@@ -280,8 +307,26 @@ export default function MatchupPage() {
   const [b2bPenalty, setB2bPenalty] = useState(DEFAULT_B2B);
   const [threeInFourPenalty, setThreeInFourPenalty] = useState(DEFAULT_3IN4);
   // B2B:n vaikutus tempoon (possessioita per B2B-joukkue, esim. −0.5).
-  const [b2bPaceAdj, setB2bPaceAdj] = useState(0);
-  const [paceMethod, setPaceMethodState] = useState<PaceMethod>("excel");
+  const [b2bPaceAdj, setB2bPaceAdj] = useState(DEFAULT_B2B_PACE);
+  const [paceMethod, setPaceMethodState] = useState<PaceMethod>("additive");
+  // Tempolle oma α: tempo on joukkueen ominaisuutena vakaampi kuin ORTG/DRTG.
+  const [paceAlpha, setPaceAlphaState] = useState(DEFAULT_PACE_ALPHA);
+  useEffect(() => {
+    try {
+      const v = Number(localStorage.getItem(PACE_ALPHA_KEY));
+      if (v >= 0.02 && v <= 0.5) setPaceAlphaState(v);
+    } catch {
+      // ei haittaa
+    }
+  }, []);
+  function setPaceAlpha(v: number) {
+    setPaceAlphaState(v);
+    try {
+      localStorage.setItem(PACE_ALPHA_KEY, String(v));
+    } catch {
+      // ei haittaa
+    }
+  }
   useEffect(() => {
     try {
       const v = localStorage.getItem(PACE_KEY);
@@ -306,6 +351,30 @@ export default function MatchupPage() {
 
   // Vedonlyöntilinjat (kotijoukkueen tasoitus, over/under-raja).
   const [spreadLine, setSpreadLine] = useState("");
+  // Kierros: kertoimet The Odds API:sta (/api/odds).
+  const [oddsEvents, setOddsEvents] = useState<OddsEvent[]>([]);
+  const [oddsInfo, setOddsInfo] = useState<string | null>(null);
+  const [oddsLoading, setOddsLoading] = useState(false);
+  const [oddsBook, setOddsBook] = useState("consensus");
+  async function loadOdds(refresh = false) {
+    setOddsLoading(true);
+    setOddsInfo(null);
+    try {
+      const res = await fetch(`/api/odds${refresh ? "?refresh=1" : ""}`);
+      const data = await res.json().catch(() => ({ error: `palvelin vastasi ${res.status}` }));
+      if (!res.ok) {
+        setOddsInfo(`Virhe: ${data.error ?? res.status}`);
+      } else {
+        setOddsEvents(data.events ?? []);
+        const t = data.fetchedAt ? new Date(data.fetchedAt).toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" }) : "";
+        setOddsInfo(`${(data.events ?? []).length} ottelua, haettu ${t}${data.cached ? " (välimuisti)" : ""}${data.remaining ? ` · krediittejä jäljellä ${data.remaining}` : ""}`);
+      }
+    } catch (e: any) {
+      setOddsInfo(`Virhe: ${e?.message ?? "tuntematon virhe"}`);
+    } finally {
+      setOddsLoading(false);
+    }
+  }
   const [totalLine, setTotalLine] = useState("");
 
   // Tämän ottelun kokoonpano: pelaajakohtaiset minuutit (ohittaa oletuksen)
@@ -516,13 +585,26 @@ export default function MatchupPage() {
     return { o, d, total, roster };
   }
 
-  function finalStatsFor(team: TeamStats | undefined) {
-    if (!team) return null;
+  function blendOf(team: TeamStats) {
     const w = team.coach_change ? 1 : blendWeight / 100;
     const mix = (a: number | null, b: number | null) => (a ?? b ?? LEAGUE_AVG_PACE) * w + (b ?? a ?? LEAGUE_AVG_PACE) * (1 - w);
-    const ortgBlend = mix(team.ortg_2526, team.ortg_2425);
-    const drtgBlend = mix(team.drtg_2526, team.drtg_2425);
-    const paceBlend = mix(team.pace_2526, team.pace_2425);
+    return { o: mix(team.ortg_2526, team.ortg_2425), d: mix(team.drtg_2526, team.drtg_2425), p: mix(team.pace_2526, team.pace_2425) };
+  }
+  // Lähtötason liigakeskiarvot (regressio vedetään näitä kohti).
+  const priorLeague = (() => {
+    const bs = teams.map(blendOf);
+    if (bs.length === 0) return { r: 114, p: LEAGUE_AVG_PACE };
+    return { r: bs.reduce((s, b) => s + (b.o + b.d) / 2, 0) / bs.length, p: bs.reduce((s, b) => s + b.p, 0) / bs.length };
+  })();
+
+  function finalStatsFor(team: TeamStats | undefined) {
+    if (!team) return null;
+    const bl = blendOf(team);
+    const kr = carry.rating / 100;
+    const kp = carry.pace / 100;
+    const ortgBlend = priorLeague.r + kr * (bl.o - priorLeague.r);
+    const drtgBlend = priorLeague.r + kr * (bl.d - priorLeague.r);
+    const paceBlend = priorLeague.p + kp * (bl.p - priorLeague.p);
 
     const played = gamesByTeam[team.team] ?? [];
 
@@ -534,7 +616,7 @@ export default function MatchupPage() {
     const offD = off?.offD ?? 0;
     const ortgActual = ewma(ortgBlend + offO, played.map((g) => g.ortg), alpha);
     const drtgActual = ewma(drtgBlend - offD, played.map((g) => g.drtg), alpha);
-    const paceActual = ewma(paceBlend, played.map((g) => g.pace), alpha);
+    const paceActual = ewma(paceBlend, played.map((g) => g.pace), paceAlpha);
 
     // Siirrot:
     //  - vanha tila (ei viime kauden minuutteja): kaikki siirrot, vaimennus pelien mukaan
@@ -627,6 +709,18 @@ export default function MatchupPage() {
     const base = project(homeFinal.modelOrtg, homeFinal.modelDrtg, awayFinal.modelOrtg, awayFinal.modelDrtg, pace, hca, hB2B, aB2B);
     return { pace, hca, hB2B, aB2B, ...adj, base };
   })();
+
+  // Sama laskenta kuin yllä mille tahansa parille (Kierros-näkymä).
+  function projectPair(hName: string, aName: string) {
+    const h = teams.find((t) => t.team === hName);
+    const a = teams.find((t) => t.team === aName);
+    const hf = finalStatsFor(h);
+    const af = finalStatsFor(a);
+    if (!h || !a || !hf || !af) return null;
+    const b2bCount = (fatigueOf(h.team) === "b2b" ? 1 : 0) + (fatigueOf(a.team) === "b2b" ? 1 : 0);
+    const pace = gamePace(hf.paceActual, af.paceActual) + b2bPaceAdj * b2bCount;
+    return project(hf.finalOrtg, hf.finalDrtg, af.finalOrtg, af.finalDrtg, pace, h.home_adv ?? 0, fatiguePts(fatigueOf(h.team)), fatiguePts(fatigueOf(a.team)));
+  }
 
   const parsedSpread = spreadLine.trim() === "" ? null : Number(spreadLine.replace(",", "."));
   const parsedTotal = totalLine.trim() === "" ? null : Number(totalLine.replace(",", "."));
@@ -1114,6 +1208,167 @@ export default function MatchupPage() {
         </div>
       )}
 
+      {(() => {
+        const roundEvents = oddsEvents.filter((e) => usGameDate(e.commence) === gameDate);
+        const dates = Array.from(new Set(oddsEvents.map((e) => usGameDate(e.commence)))).sort();
+        const bookKeys = Array.from(new Map(oddsEvents.flatMap((e) => e.books.map((b) => [b.key, b.title] as const))).entries());
+        const sg = (x: number) => `${x > 0 ? "+" : ""}${x.toFixed(1)}`;
+        const ev = (p: number, price: number | undefined) => (price ? p * price - 1 : null);
+        const evCell = (x: number | null, label: string, extra?: string) =>
+          x == null ? (
+            <span style={{ color: "#475569" }}>—</span>
+          ) : (
+            <span style={{ color: x > 0.03 ? "#4ade80" : x > 0 ? "#a3e635" : "#64748b", fontWeight: x > 0.03 ? 700 : 400 }}>
+              {label} {(x * 100).toFixed(1)} %{extra ? <span style={{ color: "#64748b", fontWeight: 400 }}> {extra}</span> : null}
+            </span>
+          );
+        const rows = roundEvents
+          .map((e) => {
+            const lines: BookLines | undefined = oddsBook === "consensus" ? consensus(e) : e.books.find((b) => b.key === oddsBook);
+            const pr = projectPair(e.home, e.away);
+            return { e, lines, pr };
+          })
+          .sort((x, y) => {
+            const d = (r: typeof x) => (r.pr && r.lines?.spread ? Math.abs(r.pr.margin + r.lines.spread.point) : -1);
+            return d(y) - d(x);
+          });
+        const th = { padding: "6px 8px", fontWeight: 600 as const };
+        const td = { padding: "6px 8px", whiteSpace: "nowrap" as const };
+        return (
+          <details open style={{ ...card, padding: 14, marginBottom: 12 }}>
+            <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Kierros — malli vs. markkina ({gameDate || "valitse päivä"})</summary>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "12px 0" }}>
+              <button onClick={() => loadOdds(false)} disabled={oddsLoading} style={{ background: "#2563eb", color: "white", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer" }}>
+                {oddsLoading ? "Haetaan..." : oddsEvents.length ? "Päivitä linjat" : "Hae linjat"}
+              </button>
+              {oddsEvents.length > 0 && (
+                <button onClick={() => loadOdds(true)} disabled={oddsLoading} style={{ ...smallInput, padding: "5px 10px", cursor: "pointer" }} title="Ohittaa 10 min välimuistin (kuluttaa krediittejä)">
+                  Pakota uusi haku
+                </button>
+              )}
+              {oddsEvents.length > 0 && (
+                <select value={oddsBook} onChange={(e) => setOddsBook(e.target.value)} style={{ ...smallInput }}>
+                  <option value="consensus">Konsensus (mediaani, ML ilman marginaalia)</option>
+                  {bookKeys.map(([k, t]) => (
+                    <option key={k} value={k}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {oddsInfo && <span style={{ fontSize: 12, color: oddsInfo.startsWith("Virhe") ? "#f87171" : "#64748b" }}>{oddsInfo}</span>}
+            </div>
+            {oddsEvents.length > 0 && roundEvents.length === 0 && (
+              <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 8 }}>
+                Päivälle {gameDate || "—"} ei ole linjoja. Päivät, joille on linjoja:{" "}
+                {dates.map((d) => (
+                  <button key={d} onClick={() => setGameDate(d)} style={{ ...smallInput, padding: "1px 8px", marginRight: 4, cursor: "pointer" }}>
+                    {d}
+                  </button>
+                ))}
+              </div>
+            )}
+            {rows.length > 0 && (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ borderCollapse: "collapse", fontSize: 12, width: "100%" }}>
+                  <thead>
+                    <tr style={{ color: "#94a3b8", textAlign: "left" }}>
+                      <th style={th}>Ottelu (vieras @ koti)</th>
+                      <th style={th}>Tasoitus malli / markkina</th>
+                      <th style={th}>Ero</th>
+                      <th style={th}>Tasoitus EV</th>
+                      <th style={th}>Total malli / markkina</th>
+                      <th style={th}>Total EV</th>
+                      <th style={th}>ML koti malli / markkina</th>
+                      <th style={th}>ML EV</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(({ e, lines, pr }) => {
+                      if (!pr) {
+                        return (
+                          <tr key={e.id} style={{ borderTop: "1px solid #1f2937" }}>
+                            <td style={td}>{e.away} @ {e.home}</td>
+                            <td style={{ ...td, color: "#f87171" }} colSpan={7}>Joukkuetta ei löydy Teams-taulusta</td>
+                          </tr>
+                        );
+                      }
+                      const modelSpread = -pr.margin; // kotijoukkueen tasoitus vedonlyöntimuodossa
+                      const sp = lines?.spread;
+                      const tt = lines?.total;
+                      const ml = lines?.ml;
+                      const pCover = sp ? normCdf((pr.margin + sp.point) / marginSd) : null;
+                      const spSideHome = pCover != null && pCover >= 0.5;
+                      const spBest = sp ? bestPrice(e, spSideHome ? "spread-home" : "spread-away", spSideHome ? sp.point : sp.point) : null;
+                      const spPrice = sp ? (oddsBook === "consensus" ? spBest?.price : spSideHome ? sp.home : sp.away) : undefined;
+                      const spEv = pCover != null ? ev(spSideHome ? pCover : 1 - pCover, spPrice) : null;
+                      const pOver = tt ? 1 - normCdf((tt.point - pr.total) / totalSd) : null;
+                      const overSide = pOver != null && pOver >= 0.5;
+                      const ttBest = tt ? bestPrice(e, overSide ? "over" : "under", tt.point) : null;
+                      const ttPrice = tt ? (oddsBook === "consensus" ? ttBest?.price : overSide ? tt.over : tt.under) : undefined;
+                      const ttEv = pOver != null ? ev(overSide ? pOver : 1 - pOver, ttPrice) : null;
+                      const pHome = normCdf(pr.margin / marginSd);
+                      const mktHome = ml ? 1 / ml.home / (1 / ml.home + 1 / ml.away) : null;
+                      const mlHomeSide = mktHome != null && pHome >= mktHome;
+                      const mlBest = ml ? bestPrice(e, mlHomeSide ? "ml-home" : "ml-away") : null;
+                      const mlPrice = ml ? (oddsBook === "consensus" ? mlBest?.price : mlHomeSide ? ml.home : ml.away) : undefined;
+                      const mlEv = ml ? ev(mlHomeSide ? pHome : 1 - pHome, mlPrice) : null;
+                      const diff = sp ? modelSpread - sp.point : null;
+                      const short = (t: string) => t.split(" ").pop();
+                      return (
+                        <tr
+                          key={e.id}
+                          style={{ borderTop: "1px solid #1f2937", cursor: "pointer" }}
+                          title="Avaa ottelu yllä olevaan laskuriin"
+                          onClick={() => {
+                            setHomeTeam(e.home);
+                            setAwayTeam(e.away);
+                            if (sp) setSpreadLine(String(sp.point));
+                            if (tt) setTotalLine(String(tt.point));
+                            window.scrollTo({ top: 0, behavior: "smooth" });
+                          }}
+                        >
+                          <td style={{ ...td, color: "#e2e8f0" }}>
+                            {e.away} @ <strong>{e.home}</strong>
+                          </td>
+                          <td style={td}>
+                            {short(e.home)} {sg(modelSpread)} / {sp ? sg(sp.point) : "—"}
+                          </td>
+                          <td style={{ ...td, fontWeight: 700, color: diff == null ? "#475569" : Math.abs(diff) >= 4 ? "#f87171" : Math.abs(diff) >= 2 ? "#fbbf24" : "#94a3b8" }}>
+                            {diff == null ? "—" : sg(diff)}
+                          </td>
+                          <td style={td}>
+                            {evCell(spEv, `${short(spSideHome ? e.home : e.away)} ${pCover != null ? ((spSideHome ? pCover : 1 - pCover) * 100).toFixed(0) : ""} % ·`, spPrice ? `@${spPrice.toFixed(2)}${oddsBook === "consensus" && spBest ? ` ${spBest.book}` : ""}` : undefined)}
+                          </td>
+                          <td style={td}>
+                            {pr.total.toFixed(1)} / {tt ? tt.point.toFixed(1) : "—"}
+                          </td>
+                          <td style={td}>
+                            {evCell(ttEv, `${overSide ? "Over" : "Under"} ${pOver != null ? ((overSide ? pOver : 1 - pOver) * 100).toFixed(0) : ""} % ·`, ttPrice ? `@${ttPrice.toFixed(2)}${oddsBook === "consensus" && ttBest ? ` ${ttBest.book}` : ""}` : undefined)}
+                          </td>
+                          <td style={td}>
+                            {(pHome * 100).toFixed(0)} % / {mktHome != null ? `${(mktHome * 100).toFixed(0)} %` : "—"}
+                          </td>
+                          <td style={td}>
+                            {evCell(mlEv, `${short(mlHomeSide ? e.home : e.away)} ·`, mlPrice ? `@${mlPrice.toFixed(2)}${oddsBook === "consensus" && mlBest ? ` ${mlBest.book}` : ""}` : undefined)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div style={{ fontSize: 11, color: "#64748b", marginTop: 8, lineHeight: 1.6 }}>
+                  Järjestetty tasoituseron mukaan. Ero = mallin tasoitus − markkinan tasoitus (kotijoukkue); punainen ≥ 4 p, keltainen ≥ 2 p —
+                  isot erot kannattaa tarkistaa (poissaolot, minuutit) ennen kuin niihin luottaa. EV = mallin todennäköisyys × kerroin − 1
+                  paremmalle puolelle; konsensuksessa kerroin on paras saatavilla oleva samalla linjalla. Vihreä lihavoitu = EV &gt; 3 %.
+                  Mallin väsymys ja kokoonpanot lasketaan valitulle päivälle. Klikkaa riviä avataksesi ottelun laskuriin.
+                </div>
+              </div>
+            )}
+          </details>
+        );
+      })()}
+
       {statusMsg && <div style={{ color: "#f87171", fontSize: 13, marginBottom: 12 }}>{statusMsg}</div>}
       {!usePrev && !loading && (
         <div style={{ color: "#fbbf24", fontSize: 12, marginBottom: 12 }}>
@@ -1151,10 +1406,25 @@ export default function MatchupPage() {
             </label>
             <input type="range" min={0} max={100} value={blendWeight} onChange={(e) => setBlendWeight(Number(e.target.value))} style={{ width: "100%" }} />
             <div style={{ fontSize: 11, color: "#64748b" }}>Muistetaan tässä selaimessa. &quot;Coach vaihtui&quot; -joukkueet käyttävät aina vain 25-26.</div>
+            <label style={{ fontSize: 12, color: "#94a3b8", display: "block", margin: "14px 0 4px" }}>
+              Kauden alun regressio — säilyy: ratingit {carry.rating} %, tempo {carry.pace} %
+              {(carry.rating !== DEFAULT_CARRY || carry.pace !== DEFAULT_PACE_CARRY) && (
+                <button onClick={() => setCarry({ rating: DEFAULT_CARRY, pace: DEFAULT_PACE_CARRY })} style={{ ...smallInput, marginLeft: 8, padding: "1px 8px", fontSize: 11, cursor: "pointer" }}>
+                  Palauta {DEFAULT_CARRY} / {DEFAULT_PACE_CARRY}
+                </button>
+              )}
+            </label>
+            <input type="range" min={30} max={100} step={5} value={carry.rating} onChange={(e) => setCarry({ ...carry, rating: Number(e.target.value) })} style={{ width: "100%" }} />
+            <input type="range" min={30} max={100} step={5} value={carry.pace} onChange={(e) => setCarry({ ...carry, pace: Number(e.target.value) })} style={{ width: "100%" }} />
+            <div style={{ fontSize: 11, color: "#64748b" }}>
+              Viime kauden ORTG/DRTG ja tempo vedetään liigakeskiarvoa kohti ennen kesän muutoksia ja pelattuja otteluita. Datassa
+              (2024-25 → 2025-26) Net-eroista säilyi ~54 % ja tempoeroista ~50 %; ratingien oletus on korkeampi, koska rosterimuutokset
+              lasketaan erikseen. 100 % = ei regressiota (vanha tapa). Vaikutus hiipuu EWMA:n myötä pelien kertyessä.
+            </div>
           </div>
           <div>
             <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>
-              Pelattujen otteluiden paino (α): {alpha.toFixed(2)} (~{Math.round(1 / alpha)} pelin muisti)
+              Pelattujen otteluiden paino ORTG/DRTG (α): {alpha.toFixed(2)} (~{Math.round(1 / alpha)} pelin muisti)
             </label>
             <input type="range" min={0.05} max={0.5} step={0.01} value={alpha} onChange={(e) => setAlpha(Number(e.target.value))} style={{ width: "100%" }} />
             <label style={{ fontSize: 12, color: "#94a3b8", display: "flex", gap: 6, alignItems: "center", marginTop: 14 }}>
@@ -1179,10 +1449,25 @@ export default function MatchupPage() {
               ))}
             </select>
             <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>
-              Liigan keskipace {leaguePace.toFixed(1)}. Additiivinen nopeuttaa kahden nopean ja hidastaa kahden hitaan joukkueen ottelua.
+              Liigan keskipace {leaguePace.toFixed(1)}. Regressio kausilta 2024-25 ja 2025-26 (2460 ottelua): ottelun tempo =
+              liiga + 1.0 × (koti − liiga) + 1.0 × (vieras − liiga), eli additiivinen. Excel-kaava toimii vain kauden alussa,
+              kun luvut ovat viime kaudelta.
+            </div>
+            <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>
+              Tempon α: {paceAlpha.toFixed(2)} (~{Math.round(1 / paceAlpha)} pelin muisti)
+              {paceAlpha !== DEFAULT_PACE_ALPHA && (
+                <button onClick={() => setPaceAlpha(DEFAULT_PACE_ALPHA)} style={{ ...smallInput, marginLeft: 8, padding: "1px 8px", fontSize: 11, cursor: "pointer" }}>
+                  Palauta {DEFAULT_PACE_ALPHA}
+                </button>
+              )}
+            </label>
+            <input type="range" min={0.02} max={0.3} step={0.01} value={paceAlpha} onChange={(e) => setPaceAlpha(Number(e.target.value))} style={{ width: "100%" }} />
+            <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>
+              Erillään ratingien α:sta: tempo on vakaampi, ja 0.08 oli paras 2025-26 kauden simulaatiossa.
             </div>
             <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>B2B:n tempovaikutus (poss / B2B-joukkue)</label>
-            <input type="number" step="0.25" value={b2bPaceAdj} onChange={(e) => setB2bPaceAdj(parseFloat(e.target.value) || 0)} style={{ ...smallInput, width: 70, marginBottom: 12 }} />
+            <input type="number" step="0.05" value={b2bPaceAdj} onChange={(e) => setB2bPaceAdj(parseFloat(e.target.value) || 0)} style={{ ...smallInput, width: 70, marginBottom: 4 }} />
+            <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>Regressio: −0.45 per B2B-joukkue. 3 peliä / 4 pv ei vaikuta tempoon.</div>
             <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>Väsymysvähennys: B2B / 3 peliä 4 pv (pistettä)</label>
             <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
               <input type="number" step="0.5" value={b2bPenalty} onChange={(e) => setB2bPenalty(parseFloat(e.target.value) || 0)} style={{ ...smallInput, width: 70 }} />
@@ -1207,7 +1492,7 @@ export default function MatchupPage() {
             <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ color: "#94a3b8", textAlign: "left" }}>
-                  {["Joukkue", "Kausiblendi O/D", "Kesän muutos O/D", "Pelattu", "EWMA O/D", usePrev ? "Kauden siirrot O/D" : "Siirrot O/D", "Kokoonpano O/D", "Final ORTG", "Final DRTG", "Pace", "HCA"].map((h) => (
+                  {["Joukkue", "Lähtötaso O/D (regressoitu)", "Kesän muutos O/D", "Pelattu", "EWMA O/D", usePrev ? "Kauden siirrot O/D" : "Siirrot O/D", "Kokoonpano O/D", "Final ORTG", "Final DRTG", "Pace", "HCA"].map((h) => (
                     <th key={h} style={{ padding: 6 }}>
                       {h}
                     </th>
