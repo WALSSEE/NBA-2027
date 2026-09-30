@@ -66,6 +66,27 @@ export default function PlayersPage() {
   const [injStatus, setInjStatus] = useState<string | null>(null);
   const [injBusy, setInjBusy] = useState(false);
   const abbrToTeam = (a: string) => TEAM_NAME_BY_ABBR[({ BRK: "BKN", CHO: "CHA", PHO: "PHX" } as Record<string, string>)[a] ?? a] ?? null;
+  const [injTeam, setInjTeam] = useState("");
+  async function saveInjOne(p: any, raw: string) {
+    const val = raw.trim() === "" ? null : Number(raw.replace(",", "."));
+    const cur = p.inj82 == null ? null : Number(p.inj82);
+    if (val === cur || (val != null && Number.isNaN(val))) return;
+    if (!secret) {
+      setInjStatus("Virhe: syötä CRON_SECRET ensin.");
+      return;
+    }
+    const res = await fetch("/api/players/injury", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+      body: JSON.stringify({ rows: [{ name: p.name, team: p.team, inj: val }] }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) setInjStatus(`Virhe: ${j.error ?? res.status}`);
+    else {
+      setInjStatus(`${p.name}: ${val == null ? "oletus" : val + " / 82"} tallennettu.`);
+      setCurrent((prev) => prev.map((x: any) => (x.name === p.name ? { ...x, inj82: val } : x)));
+    }
+  }
   async function saveInj() {
     const rows = parseInjuryTable(injRaw, abbrToTeam);
     if (rows.length === 0) {
@@ -788,6 +809,66 @@ export default function PlayersPage() {
           <div style={{ fontSize: 12, color: "#64748b", marginTop: 8 }}>
             Kannassa poissaoloriski {current.filter((p: any) => p.inj82 != null).length} / {current.length} pelaajalla.
           </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 16, flexWrap: "wrap" }}>
+            <select
+              value={injTeam}
+              onChange={(e) => setInjTeam(e.target.value)}
+              style={{ background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "6px 8px", fontSize: 12 }}
+            >
+              <option value="">Kaikki joukkueet (eniten poissaoloja ensin)</option>
+              {ALL_TEAMS.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+            <span style={{ fontSize: 11, color: "#64748b" }}>
+              Vain pelaajat, joilla on minuutteja. Muokkaa lukua ja paina Enter tai klikkaa pois — tallentuu heti.
+            </span>
+          </div>
+          <table style={{ borderCollapse: "collapse", fontSize: 12, marginTop: 10 }}>
+            <thead>
+              <tr style={{ color: "#94a3b8", textAlign: "left" }}>
+                {["Pelaaja", "Joukkue", "Min", "Poissaoloja / 82", "Osuus", "Lähde"].map((h) => (
+                  <th key={h} style={{ padding: "4px 10px" }}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {current
+                .filter((p: any) => p.active && Number(p.mpg_base) > 0 && (!injTeam || p.team === injTeam))
+                .map((p: any) => {
+                  const own = p.inj82 != null && !Number.isNaN(Number(p.inj82));
+                  const v = own ? Number(p.inj82) : null;
+                  return { p, v };
+                })
+                .sort((a, b) => (injTeam ? Number(b.p.mpg_base) - Number(a.p.mpg_base) : (b.v ?? -1) - (a.v ?? -1)))
+                .slice(0, injTeam ? 40 : 150)
+                .map(({ p, v }) => (
+                  <tr key={p.id} style={{ borderTop: "1px solid #1f2937" }}>
+                    <td style={{ padding: "3px 10px" }}>{p.name}</td>
+                    <td style={{ padding: "3px 10px", color: "#94a3b8" }}>{p.team}</td>
+                    <td style={{ padding: "3px 10px", color: "#94a3b8" }}>{Number(p.mpg_base).toFixed(1)}</td>
+                    <td style={{ padding: "3px 10px" }}>
+                      <input
+                        key={`${p.id}-${v}`}
+                        type="number"
+                        step="0.5"
+                        defaultValue={v ?? ""}
+                        placeholder="oletus"
+                        onBlur={(e) => saveInjOne(p, e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+                        style={{ width: 70, background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, padding: "2px 6px", fontSize: 12 }}
+                      />
+                    </td>
+                    <td style={{ padding: "3px 10px", color: "#94a3b8" }}>{v != null ? `${Math.round((v / 82) * 100)} %` : "—"}</td>
+                    <td style={{ padding: "3px 10px", color: "#64748b" }}>{v != null ? "ennuste" : "oletus (viime kausi + liigataso)"}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
         </div>
       )}
 

@@ -13,7 +13,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   const body = await request.json().catch(() => null);
-  const rows: { name: string; team: string; inj: number; role?: string }[] = Array.isArray(body?.rows) ? body.rows : [];
+  const rows: { name: string; team: string; inj: number | null; role?: string }[] = Array.isArray(body?.rows) ? body.rows : [];
   if (rows.length === 0) return NextResponse.json({ error: "Ei rivejä." }, { status: 400 });
   const supabase = getSupabaseAdmin();
   const { data: players, error } = await fetchAll((a, b) => supabase.from("players").select("id, team, name").order("id").range(a, b));
