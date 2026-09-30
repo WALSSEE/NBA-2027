@@ -1632,7 +1632,7 @@ export default function MatchupPage() {
                           const pr = pre.byTeam[r.team];
                           if (!pr) return "";
                           const known = pr.avail && pr.avail.list.length > 0
-                            ? ` · tunnetut ${signed(-(pr.availO + pr.availD))} (${pr.avail.list.map((x) => `${x.name.split(" ").slice(-1)[0]} ${Math.round(x.share * 100)} %`).join(", ")})`
+                            ? ` · tunnetut ${signed(-(pr.availO + pr.availD))} (${pr.avail.list.map((x) => `${x.name.split(" ").filter((w) => !/^(Jr\.?|Sr\.?|II|III|IV)$/i.test(w)).slice(-1)[0]} ${Math.round(x.share * 100)} %${x.until ? "" : " (ei paluupv.)"}`).join(", ")})`
                             : "";
                           return `odotetut ${signed(-(pr.injO + pr.injD))}${known}`;
                         })()}
