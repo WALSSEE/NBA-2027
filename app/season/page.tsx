@@ -86,19 +86,21 @@ export default function SeasonPage() {
     if (teams.length === 0 || players.length === 0) return [];
     // Win totalit sekoitetaan tällä sivulla omalla painollaan, joten Matchupin win total -painoa ei käytetä tässä.
     const rp = withRatings(players, settings.ratingSource ?? "avg");
-    const pre = computePreseason(teams, rp, prevRows, { ...settings, marketWeight: 0 });
+    const pre = computePreseason(teams, rp, prevRows, { ...settings, marketWeight: 0 }, undefined, games as any);
     const base = teams
       .filter((t) => pre.byTeam[t.team])
       .map((t) => ({
         team: t.team,
-        net: pre.byTeam[t.team].net,
+        net: pre.byTeam[t.team].seasonNet, // tunnetut pitkät poissaolot vähennetty
         pace: pre.byTeam[t.team].paceBlend - (settings.paceShift ?? 0),
         hca: t.home_adv ?? 2.5,
       }));
     const mean = base.reduce((a, t) => a + t.net, 0) / Math.max(1, base.length);
-    const ti = teamInputs(base.map((t) => ({ ...t, net: t.net - mean })), rp, prevRows, settings.carry.player / 100);
+    const known: Record<string, number> = {};
+    for (const r of Object.values(pre.byTeam)) for (const x of r.avail?.list ?? []) known[x.name] = x.share;
+    const ti = teamInputs(base.map((t) => ({ ...t, net: t.net - mean })), rp, prevRows, settings.carry.player / 100, undefined, known);
     return ti.map((t) => ({ ...t, sdOverride: sdOv[t.team] }));
-  }, [teams, players, prevRows, settings, sdOv]);
+  }, [teams, players, prevRows, settings, sdOv, games]);
   const schedule = useMemo(() => buildSchedule(games, SEASON_START, fatigue), [games, fatigue]);
 
   function run() {

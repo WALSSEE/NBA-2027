@@ -106,7 +106,8 @@ export function teamInputs(
   players: { team: string; name: string; oepm: number; depm: number; mpg_base: number; active: boolean }[],
   prevRows: PrevRow[],
   playerCarry: number, // 0–1, sama pelaajakerroin kuin lähtötasossa
-  replacementEpm = -1.5
+  replacementEpm = -1.3,
+  knownMiss: Record<string, number> = {} // tunnettu poissaolo-osuus (jo vähennetty Netistä)
 ): TeamInput[] {
   const gp = new Map<string, { gp: number; teams: Set<string> }>();
   for (const r of prevRows) {
@@ -129,7 +130,9 @@ export function teamInputs(
       // odotettu poissaolo-osuus: puolet viime kauden poissaoloista + puolet liigan keskiarvosta (~12 %)
       const g = prev ? prev.gp : 70;
       const missMean = Math.min(0.35, Math.max(0.05, 0.5 * (1 - Math.min(82, g) / 82) + 0.5 * 0.12));
-      return { name: p.name, loss, missMean };
+      // Tunnetusti poissa oleva: satunnainen lisäpoissaolo vain siltä osin kun hän pelaa.
+      const known = Math.min(1, knownMiss[p.name] ?? 0);
+      return { name: p.name, loss, missMean: missMean * (1 - known) };
     });
     contrib.sort((a, b) => b.loss - a.loss);
     return { ...t, newShare: newMin / tot, stars: contrib.slice(0, 3).filter((s) => s.loss > 0.3) };

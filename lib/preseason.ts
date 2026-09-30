@@ -1,3 +1,4 @@
+import { teamAvailability, type TeamAvailability } from "./availability";
 import { computeOffseason, leagueNormalize, canonTeam, type PrevRow, type OffseasonTeam } from "./prevSeason";
 
 // Kauden 26-27 lähtötaso (preseason) — sama laskenta Matchupissa ja Teams-sivulla.
@@ -73,6 +74,13 @@ export type PreRow = {
   ortg: number; // preseason 26-27
   drtg: number;
   net: number;
+  // Tunnettujen pitkien poissaolojen vaikutus kauden keskitasoon (× pelaajakerroin, + = menetys).
+  // Ei sisälly ortg/drtg/net-lukuihin (Matchup käsittelee poissaolot ottelukohtaisesti),
+  // vaan seasonNet-lukuun, jota käytetään win total -vertailussa ja kausisimulaatiossa.
+  availO: number;
+  availD: number;
+  seasonNet: number;
+  avail?: TeamAvailability;
   off?: OffseasonTeam;
 };
 export type WinRow = { team: string; wins: number; mkt: number; model: number; diff: number };
@@ -82,8 +90,10 @@ export function computePreseason(
   players: { team: string; name: string; oepm: number; depm: number; mpg_base: number; active: boolean; nba_id?: number | null }[],
   prevRows: PrevRow[],
   s: PreSettings,
-  rawOffseason?: Record<string, OffseasonTeam>
+  rawOffseason?: Record<string, OffseasonTeam>,
+  games?: { date: string; home: string; away: string; season_type?: string }[] | null
 ) {
+  const avail = teamAvailability(players as any, games);
   const usePrev = prevRows.length > 0;
   const raw = rawOffseason ?? (usePrev ? computeOffseason(players as any, prevRows) : {});
   const norm = leagueNormalize(raw);
@@ -134,6 +144,10 @@ export function computePreseason(
       ortg: ortgBlend + offO,
       drtg: drtgBlend - offD,
       net: ortgBlend + offO - (drtgBlend - offD),
+      availO: (avail[t.team]?.o ?? 0) * kpl,
+      availD: (avail[t.team]?.d ?? 0) * kpl,
+      seasonNet: ortgBlend + offO - (drtgBlend - offD) - ((avail[t.team]?.o ?? 0) + (avail[t.team]?.d ?? 0)) * kpl,
+      avail: avail[t.team],
       off: base,
     };
   });
@@ -142,11 +156,11 @@ export function computePreseason(
   const withWins = teams.filter((t) => t.win_total != null && !Number.isNaN(Number(t.win_total)));
   let winRows: WinRow[] = [];
   if (withWins.length >= 20) {
-    const mMean = withWins.reduce((a, t) => a + byTeam[t.team].net, 0) / withWins.length;
+    const mMean = withWins.reduce((a, t) => a + byTeam[t.team].seasonNet, 0) / withWins.length;
     const imp = withWins.map((t) => (Number(t.win_total) - 41) / WINS_PER_NET);
     const iMean = imp.reduce((a, x) => a + x, 0) / imp.length;
     winRows = withWins.map((t, i) => {
-      const model = byTeam[t.team].net - mMean;
+      const model = byTeam[t.team].seasonNet - mMean;
       const mkt = imp[i] - iMean;
       return { team: t.team, wins: Number(t.win_total), mkt, model, diff: mkt - model };
     });
@@ -160,6 +174,7 @@ export function computePreseason(
         p.ortg += sh / 2;
         p.drtg -= sh / 2;
         p.net += sh;
+        p.seasonNet += sh;
       }
     }
   }
@@ -173,11 +188,12 @@ export function calibrateCarry(
   teams: PreTeam[],
   players: Parameters<typeof computePreseason>[1],
   prevRows: PrevRow[],
-  s: PreSettings
+  s: PreSettings,
+  games?: Parameters<typeof computePreseason>[5]
 ) {
   const raw = prevRows.length > 0 ? computeOffseason(players as any, prevRows) : {};
   const score = (player: number, res: number) => {
-    const out = computePreseason(teams, players, prevRows, { ...s, marketWeight: 0, carry: { ...s.carry, player, res } }, raw);
+    const out = computePreseason(teams, players, prevRows, { ...s, marketWeight: 0, carry: { ...s.carry, player, res } }, raw, games);
     const r = out.winRows;
     if (r.length === 0) return null;
     const rmse = Math.sqrt(r.reduce((a, x) => a + x.diff * x.diff, 0) / r.length);

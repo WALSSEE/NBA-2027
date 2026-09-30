@@ -61,7 +61,7 @@ export default function SourceCompare({
     const out = {} as Record<RatingSource, Record<string, number>>;
     for (const src of SOURCES) {
       const pre = computePreseason(teams, withRatings(players, src), prevRows, { ...settings, marketWeight: 0 });
-      out[src] = Object.fromEntries(Object.values(pre.byTeam).map((r) => [r.team, r.net]));
+      out[src] = Object.fromEntries(Object.values(pre.byTeam).map((r) => [r.team, r.seasonNet]));
     }
     return out;
   }, [teams, players, prevRows, settings]);

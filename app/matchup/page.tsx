@@ -6,6 +6,7 @@ import { fairOdds, gameProbabilities, normCdf, pct } from "@/lib/probability";
 import { consensus, bestPrice, usGameDate, type OddsEvent, type BookLines } from "@/lib/odds";
 import { teamMinuteScale, canonTeam, type PrevRow } from "@/lib/prevSeason";
 import { computePreseason, calibrateCarry, WINS_PER_NET } from "@/lib/preseason";
+import { REPL_O, REPL_D } from "@/lib/availability";
 import { withRatings, RATING_LABEL, type RatingSource } from "@/lib/ratings";
 
 type TeamStats = {
@@ -608,8 +609,8 @@ export default function MatchupPage() {
 
   // Kauden lähtötaso (regressio + kesän muutos + win totalit) — sama kuin Teams-sivulla.
   const pre = useMemo(
-    () => computePreseason(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight, paceShift }),
-    [teams, players, prevRows, blendWeight, carry, leagueNorm, marketWeight, paceShift]
+    () => computePreseason(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight, paceShift }, undefined, games as any),
+    [teams, players, prevRows, blendWeight, carry, leagueNorm, marketWeight, paceShift, games]
   );
   const offseasonNorm = { meanO: pre.meanO, meanD: pre.meanD };
   const offseason = pre.offseason;
@@ -698,13 +699,20 @@ export default function MatchupPage() {
       }
       total += gm;
     }
-    return { o, d, total, roster };
+    // Minuutit, joita kukaan ei pelaa (poissaolot ilman käsin jakoa), pelaa korvaavan tason
+    // pelaaja (O ${REPL_O} / D ${REPL_D}), ei liigan keskitaso. Vaimenee samoin kuin poissaolot.
+    const fill = Math.max(0, 240 - total);
+    if (fill > 0.5) {
+      o += ((REPL_O * fill) / 48) * redistDecay;
+      d += ((REPL_D * fill) / 48) * redistDecay;
+    }
+    return { o, d, total, fill, roster };
   }
 
   const winTotalView = { rows: pre.winRows };
   const [calib, setCalib] = useState<ReturnType<typeof calibrateCarry> | null>(null);
   function runCalibration() {
-    setCalib(calibrateCarry(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight }));
+    setCalib(calibrateCarry(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight }, games as any));
   }
 
   function finalStatsFor(team: TeamStats | undefined) {
@@ -1023,7 +1031,7 @@ export default function MatchupPage() {
               kokoonpanolla {pts.toFixed(1)} (O {signed(fin?.lineupO ?? 0, 2)} / D {signed(fin?.lineupD ?? 0, 2)})
             </span>
           )}
-          <span style={{ color: minColor }}>minuutit {lu.total.toFixed(0)}/240</span>
+          <span style={{ color: minColor }} title={`Puuttuvat minuutit pelaa korvaavan tason pelaaja (O ${REPL_O} / D ${REPL_D} per 100). Skaalaa 240:een jakaa ne sen sijaan rosterin pelaajille.`}>minuutit {lu.total.toFixed(0)}/240{lu.fill > 0.5 ? ` · ${lu.fill.toFixed(0)} min korvaava taso` : ""}</span>
           <button onClick={() => scaleTo240(roster)} style={{ ...smallInput, padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>
             Skaalaa 240:een
           </button>
@@ -1110,7 +1118,15 @@ export default function MatchupPage() {
                           title="Poissaolon alkupäivä — muuta, jos pelaaja on ollut poissa jo pidempään"
                           style={{ ...smallInput, padding: "0 3px", fontSize: 10, colorScheme: "dark" }}
                         />
-                        alkaen · {absence.missed} peliä · vaikutus {Math.round((1 - absence.embedded) * 100)} %
+                        alkaen · palaa
+                        <input
+                          type="date"
+                          value={p.out_until ?? ""}
+                          onChange={(e) => saveAbsence(p, { out_until: e.target.value || null })}
+                          title="Arvioitu paluupäivä (tyhjä = ei tiedossa, koko loppukausi). Pelaaja palaa kokoonpanoon automaattisesti tästä päivästä, ja pitkä poissaolo vähennetään kauden keskitasosta (Teams, win totalit, Kausi)."
+                          style={{ ...smallInput, padding: "0 3px", fontSize: 10, colorScheme: "dark" }}
+                        />
+                        · {absence.missed} peliä · vaikutus {Math.round((1 - absence.embedded) * 100)} %
                       </div>
                     )}
                     {!effOut(p) && absence.embedded > 0.01 && (
@@ -1543,7 +1559,7 @@ export default function MatchupPage() {
           <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Malli vs. win totalit (kauden alun Net)</summary>
           <div style={{ fontSize: 11, color: "#64748b", margin: "8px 0 10px", maxWidth: 820, lineHeight: 1.6 }}>
             Markkinan Net = (win total − 41) / {WINS_PER_NET}, mallin Net = lähtötaso ennen pelattuja otteluita (regressio + kesän
-            muutos), molemmat liigakeskiarvoon nähden. Ero pisteinä ja voittoina: positiivinen = markkina pitää joukkuetta parempana kuin
+            muutos − tunnetut pitkät poissaolot kauden osuudella), molemmat liigakeskiarvoon nähden. Pitkä poissaolo: merkitse pelaaja poissa ja aseta arvioitu paluupäivä kokoonpanolistassa. Ero pisteinä ja voittoina: positiivinen = markkina pitää joukkuetta parempana kuin
             malli. Isot erot (punainen ≥ 3 p ≈ 8 voittoa) kannattaa tarkistaa: puuttuuko rosterista siirto, loukkaantuminen tai minuutit —
             vai tietääkö markkina jotain, mitä malli ei voi nähdä (tankkaus, valmentaja).
           </div>
@@ -1589,7 +1605,7 @@ export default function MatchupPage() {
             <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ color: "#94a3b8", textAlign: "left" }}>
-                  {["Joukkue", "Win total", "Markkina Net", "Malli Net", "Ero (p)", "Ero (voittoa)"].map((h) => (
+                  {["Joukkue", "Win total", "Markkina Net", "Malli Net", "Poissaolot", "Ero (p)", "Ero (voittoa)"].map((h) => (
                     <th key={h} style={{ padding: "4px 10px" }}>
                       {h}
                     </th>
@@ -1605,6 +1621,17 @@ export default function MatchupPage() {
                       <td style={{ padding: "4px 10px" }}>{r.wins}</td>
                       <td style={{ padding: "4px 10px" }}>{signed(r.mkt)}</td>
                       <td style={{ padding: "4px 10px" }}>{signed(r.model)}</td>
+                      <td
+                        style={{ padding: "4px 10px", color: "#94a3b8", fontSize: 11 }}
+                        title="Tunnetut pitkät poissaolot (poissa-merkintä + arvioitu paluupäivä), vähennetty mallin Netistä: (arvio − korvaava taso) × min/48 × poissaolo-osuus × pelaajakerroin"
+                      >
+                        {(() => {
+                          const pr = pre.byTeam[r.team];
+                          if (!pr || !pr.avail || pr.avail.list.length === 0) return "";
+                          const tot = pr.availO + pr.availD;
+                          return `${signed(-tot)} (${pr.avail.list.map((x) => `${x.name.split(" ").slice(-1)[0]} ${Math.round(x.share * 100)} %`).join(", ")})`;
+                        })()}
+                      </td>
                       <td style={{ padding: "4px 10px", fontWeight: 700, color: Math.abs(r.diff) >= 3 ? "#f87171" : Math.abs(r.diff) >= 1.5 ? "#fbbf24" : "#94a3b8" }}>
                         {signed(r.diff)}
                       </td>
@@ -1840,7 +1867,7 @@ export default function MatchupPage() {
               : "Kauden 25-26 minuutteja ei ole tallennettu (setup_season_baseline.sql), joten käytetään siirtolokia: "}
             Final ORTG = EWMA ORTG + siirtojen O-delta + kokoonpanon O-delta. Final DRTG =
             EWMA DRTG − treidien D-delta − kokoonpanon D-delta. Kokoonpanon delta = raaka EPM × (tämän ottelun min − oletus min) / 48:
-            poissa oleva pelaaja jonka minuutteja ei jaeta muille korvautuu siis liigan keskitason (0 EPM) pelaajalla. Tuplalaskennan
+            poissa oleva pelaaja jonka minuutteja ei jaeta muille korvautuu siis korvaavan tason pelaajalla (O −1.0 / D −0.3 per 100). Tuplalaskennan
             korjaus: poissaolon vaikutus × (1−α)^(pelit jotka pelaaja on jo ollut poissa), koska EWMA on jo oppinut ne pelit; muiden
             lisäminuutit vaimenevat samassa suhteessa. Palanneelle lisätään takaisin se osa poissaolosta, joka on vielä joukkueen
             luvuissa: (1 − (1−α)^poissa-pelit) × (1−α)^paluun jälkeiset pelit. Marginaali =

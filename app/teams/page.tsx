@@ -171,9 +171,10 @@ export default function TeamsPage() {
     if (key === "off_o") return p.offO;
     if (key === "off_d") return p.offD;
     if (key === "off_net") return p.offO + p.offD;
-    if (key === "pre_ortg") return p.ortg;
-    if (key === "pre_drtg") return p.drtg;
-    if (key === "pre_net") return p.net;
+    // Kauden keskitaso: tunnetut pitkät poissaolot (arvioitu paluupäivä) vähennetty.
+    if (key === "pre_ortg") return p.ortg - p.availO;
+    if (key === "pre_drtg") return p.drtg + p.availD;
+    if (key === "pre_net") return p.seasonNet;
     return null;
   };
 
@@ -335,7 +336,7 @@ export default function TeamsPage() {
               <tr style={{ textAlign: "left" }}>
                 <th style={{ padding: "6px 4px", color: "#64748b" }}>#</th>
                 <SortHeader k="team" label="Joukkue" />
-                <SortHeader k="pre_net" label="Net" title="Kauden 26-27 lähtötaso: regressio + kesän muutos (+ win total -paino), kuten Matchupissa" />
+                <SortHeader k="pre_net" label="Net" title="Kauden 26-27 keskitaso: regressio + kesän muutos (+ win total -paino) − tunnetut pitkät poissaolot (poissa-merkintä ja arvioitu paluupäivä Matchupissa; minuutit korvaavan tason pelaajalle)" />
                 <SortHeader k="pre_ortg" label="ORTG" />
                 <SortHeader k="pre_drtg" label="DRTG" />
                 <SortHeader k="off_o" label="O" title="Kesän muutos hyökkäykseen (Transactions: rosteri nyt − 25-26 pohja)" />
