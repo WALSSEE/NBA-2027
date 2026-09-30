@@ -91,14 +91,15 @@ export default function SeasonPage() {
       .filter((t) => pre.byTeam[t.team])
       .map((t) => ({
         team: t.team,
-        net: pre.byTeam[t.team].seasonNet, // tunnetut pitkät poissaolot vähennetty
+        // tunnetut pitkät poissaolot vähennetty; odotetut satunnaiset poissaolot arvotaan simulaatiossa
+        net: pre.byTeam[t.team].seasonNet + pre.byTeam[t.team].injO + pre.byTeam[t.team].injD,
         pace: pre.byTeam[t.team].paceBlend - (settings.paceShift ?? 0),
         hca: t.home_adv ?? 2.5,
       }));
     const mean = base.reduce((a, t) => a + t.net, 0) / Math.max(1, base.length);
     const known: Record<string, number> = {};
     for (const r of Object.values(pre.byTeam)) for (const x of r.avail?.list ?? []) known[x.name] = x.share;
-    const ti = teamInputs(base.map((t) => ({ ...t, net: t.net - mean })), rp, prevRows, settings.carry.player / 100, undefined, known);
+    const ti = teamInputs(base.map((t) => ({ ...t, net: t.net - mean })), rp, prevRows, settings.carry.player / 100, undefined, known, settings.injuryAdj !== false);
     return ti.map((t) => ({ ...t, sdOverride: sdOv[t.team] }));
   }, [teams, players, prevRows, settings, sdOv, games]);
   const schedule = useMemo(() => buildSchedule(games, SEASON_START, fatigue), [games, fatigue]);
@@ -115,17 +116,19 @@ export default function SeasonPage() {
       // tavoitteeseen — sama inflaatio (varianssi, loukkaantumiset) koskee sekä markkinaa että mallia.
       // (Aiemmin markkinan kalibroitu Net ja mallin raaka Net blendattiin suoraan, mikä puristi kärki- ja
       // häntäjoukkueita kohti keskikastia.)
-      const modelMean = inputs.reduce((a, t) => a + t.net, 0) / Math.max(1, inputs.length);
+      // Mallin odotettu taso = Net − odotetut poissaolot (sama, jonka simulaatio arpoo).
+      const expNet = (t: TeamInput) => t.net - t.stars.reduce((a, st) => a + st.loss * st.missMean, 0);
+      const modelMean = inputs.reduce((a, t) => a + expNet(t), 0) / Math.max(1, inputs.length);
       const targets: Record<string, number> = {};
       for (const t of inputs) {
-        const modelWins = 41 + WINS_PER_NET * (t.net - modelMean);
+        const modelWins = 41 + WINS_PER_NET * (expNet(t) - modelMean);
         targets[t.team] = lines[t.team] != null ? w * lines[t.team] + (1 - w) * modelWins : modelWins;
       }
       const mk = w > 0 && Object.keys(lines).length >= 20 ? marketNets(inputs, schedule.games, targets, opt) : {};
       const u: Record<string, { model: number; market: number | null; used: number }> = {};
       const blended = inputs.map((t) => {
         const net = mk[t.team] != null ? mk[t.team] : t.net;
-        u[t.team] = { model: t.net - modelMean, market: lines[t.team] != null ? (lines[t.team] - 41) / WINS_PER_NET : null, used: net };
+        u[t.team] = { model: expNet(t) - modelMean, market: lines[t.team] != null ? (lines[t.team] - 41) / WINS_PER_NET : null, used: net };
         return { ...t, net };
       });
       setUsed(u);
@@ -319,10 +322,10 @@ export default function SeasonPage() {
                                   {schedule.real ? ` B2B-pelejä ohjelmassa ${schedule.b2bByTeam[r.team] ?? 0}.` : ""}
                                 </div>
                                 <div>
-                                  Tähtien poissaolot (automaattinen, simulaatiossa arvottu):{" "}
+                                  Odotetut poissaolot (oma ennuste tai oletus, simulaatiossa arvottu; 5 merkittävintä):{" "}
                                   {ti.stars.length === 0
                                     ? "ei merkittäviä"
-                                    : ti.stars.map((st) => `${st.name} ~${Math.round(st.missMean * 100)} % peleistä (−${st.loss.toFixed(1)} Net kun poissa)`).join(" · ")}
+                                    : [...ti.stars].sort((x, y) => y.loss * y.missMean - x.loss * x.missMean).slice(0, 5).map((st) => `${st.name} ~${Math.round(st.missMean * 100)} % peleistä (−${st.loss.toFixed(1)} Net kun poissa)`).join(" · ")}
                                 </div>
                                 <div>
                                   Voittojakauma: {r.winDist.map((x, w) => (x > 0.004 ? `${w}:${(x * 100).toFixed(0)}` : null)).filter(Boolean).join(" ")}

@@ -1,5 +1,6 @@
 "use client";
 
+import { parseInjuryTable } from "@/lib/availability";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   parsePlayersPaste,
@@ -21,7 +22,7 @@ const ALL_TEAMS = Array.from(new Set(Object.values(TEAM_NAME_BY_ABBR))).sort();
 const LEAGUE_ACCUMULATOR_KEY = "epm_league_accumulator_v1";
 
 export default function PlayersPage() {
-  const [tab, setTab] = useState<"excel" | "site" | "league" | "manual" | "prev" | "darko">("excel");
+  const [tab, setTab] = useState<"excel" | "site" | "league" | "manual" | "prev" | "darko" | "inj">("excel");
   const [ratingSrc, setRatingSrc] = useState<RatingSource>("avg");
   useEffect(() => {
     loadPreSettingsRemote().then((s) => setRatingSrc(s.ratingSource ?? "avg"));
@@ -57,6 +58,41 @@ export default function PlayersPage() {
       setDarkoStatus(`Virhe: ${e?.message ?? e}`);
     } finally {
       setDarkoBusy(false);
+    }
+  }
+
+  // --- Poissaoloriski (BBall Index durability) ---
+  const [injRaw, setInjRaw] = useState("");
+  const [injStatus, setInjStatus] = useState<string | null>(null);
+  const [injBusy, setInjBusy] = useState(false);
+  const abbrToTeam = (a: string) => TEAM_NAME_BY_ABBR[({ BRK: "BKN", CHO: "CHA", PHO: "PHX" } as Record<string, string>)[a] ?? a] ?? null;
+  async function saveInj() {
+    const rows = parseInjuryTable(injRaw, abbrToTeam);
+    if (rows.length === 0) {
+      setInjStatus("Virhe: taulukosta ei löytynyt pelaajarivejä (PLAYER, SCORE, INJURY / 82, …).");
+      return;
+    }
+    setInjBusy(true);
+    setInjStatus(null);
+    localStorage.setItem("cron_secret", secret);
+    try {
+      const res = await fetch("/api/players/injury", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+        body: JSON.stringify({ rows }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) setInjStatus(`Virhe: ${j.error ?? res.status}`);
+      else
+        setInjStatus(
+          `Tallennettu: ${j.rows} riviä, ${j.updatedPlayers} pelaajariviä päivitetty.` +
+            (j.unmatched?.length ? ` Ei löytynyt kannasta (starter/rotation): ${j.unmatched.join(", ")}` : "")
+        );
+      await loadCurrent();
+    } catch (e: any) {
+      setInjStatus(`Virhe: ${e?.message ?? e}`);
+    } finally {
+      setInjBusy(false);
     }
   }
 
@@ -523,6 +559,20 @@ export default function PlayersPage() {
         >
           DARKO
         </button>
+        <button
+          onClick={() => setTab("inj")}
+          style={{
+            padding: "8px 16px",
+            fontSize: 13,
+            background: "transparent",
+            border: "none",
+            borderBottom: tab === "inj" ? "2px solid #2563eb" : "2px solid transparent",
+            color: tab === "inj" ? "#e2e8f0" : "#64748b",
+            cursor: "pointer",
+          }}
+        >
+          Poissaoloriski
+        </button>
       </div>
 
       {tab === "prev" && (() => {
@@ -705,6 +755,38 @@ export default function PlayersPage() {
           {darkoStatus && <div style={{ fontSize: 12, marginTop: 8, color: darkoStatus.startsWith("Virhe") ? "#f87171" : "#4ade80", lineHeight: 1.6 }}>{darkoStatus}</div>}
           <div style={{ fontSize: 12, color: "#64748b", marginTop: 8 }}>
             Kannassa DARKO-luku {current.filter((p: any) => p.darko_o != null).length} / {current.length} pelaajalla.
+          </div>
+        </div>
+      )}
+
+      {tab === "inj" && (
+        <div style={{ maxWidth: 820, marginBottom: 32 }}>
+          <p style={{ color: "#64748b", fontSize: 13, marginBottom: 12, lineHeight: 1.6 }}>
+            Odotetut poissaolopelit / 82 pelaajittain (inj82). Oma ennuste ladataan ajamalla <code>supabase/setup_injury_projection.sql</code>
+            (NBA:n play-by-play 2024-25 ja 2025-26: 0.4 × oma poissaolohistoria + 0.6 × liigan taso ~23 / 82). Vaihtoehtoisesti voit liittää
+            alle BBall Indexin Durability-taulukon (sarake <em>Injury / 82 … on a normal team</em>). Luku ohjaa kausisimulaation
+            poissaoloarvontaa kaikille rotaatiopelaajille ja vähennetään kauden keskitasosta (Teams, win total -vertailu). Pelaaja ilman
+            lukua: 0.4 × viime kauden poissaolot + 0.6 × liigan taso. Tunnetut pitkät poissaolot (poissa + paluupäivä Matchupissa) lasketaan erikseen.
+          </p>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+            <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="CRON_SECRET" style={{ background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "6px 8px", fontSize: 12, width: 150 }} />
+            <button
+              onClick={saveInj}
+              disabled={injBusy || !secret || !injRaw.trim()}
+              style={{ background: "#2563eb", color: "white", border: "none", borderRadius: 6, padding: "7px 14px", fontSize: 12, cursor: "pointer" }}
+            >
+              {injBusy ? "Tallennetaan..." : `Tallenna poissaoloriski (${parseInjuryTable(injRaw, abbrToTeam).length} pelaajaa)`}
+            </button>
+          </div>
+          <textarea
+            value={injRaw}
+            onChange={(e) => setInjRaw(e.target.value)}
+            placeholder={"PLAYER\tSCORE\tINJURY / 82\t...ON A NORMAL TEAM\t26-27\t25-26\tROLE\t...\nJalen Johnson\t1\t18.3\t18.3\tATL\tATL\tstarter\t..."}
+            style={{ width: "100%", height: 120, background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: 8, fontFamily: "monospace", fontSize: 11 }}
+          />
+          {injStatus && <div style={{ fontSize: 12, marginTop: 8, color: injStatus.startsWith("Virhe") ? "#f87171" : "#4ade80", lineHeight: 1.6 }}>{injStatus}</div>}
+          <div style={{ fontSize: 12, color: "#64748b", marginTop: 8 }}>
+            Kannassa poissaoloriski {current.filter((p: any) => p.inj82 != null).length} / {current.length} pelaajalla.
           </div>
         </div>
       )}

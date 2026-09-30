@@ -1,3 +1,4 @@
+import { expectedMissShare } from "./availability";
 import { normalizePlayerName } from "./parseTransactions";
 import { canonTeam, type PrevRow } from "./prevSeason";
 
@@ -97,7 +98,7 @@ export type TeamInput = {
   hca: number;
   newShare: number; // uusien pelaajien osuus minuuteista (0–1)
   sdOverride?: number; // käsin asetettu joukkueen tason epävarmuus (Net-hajonta), ohittaa automaattisen
-  stars: { name: string; loss: number; missMean: number }[]; // loss = Net-pudotus kun poissa
+  stars: { name: string; loss: number; missMean: number; min?: number }[]; // loss = Net-pudotus kun poissa
 };
 
 // Joukkuekohtaiset varianssitekijät pelaajadatasta.
@@ -107,7 +108,8 @@ export function teamInputs(
   prevRows: PrevRow[],
   playerCarry: number, // 0–1, sama pelaajakerroin kuin lähtötasossa
   replacementEpm = -1.3,
-  knownMiss: Record<string, number> = {} // tunnettu poissaolo-osuus (jo vähennetty Netistä)
+  knownMiss: Record<string, number> = {}, // tunnettu poissaolo-osuus (jo vähennetty Netistä)
+  allPlayers = true // false = vanha tapa: vain 3 suurinta tähteä
 ): TeamInput[] {
   const gp = new Map<string, { gp: number; teams: Set<string> }>();
   for (const r of prevRows) {
@@ -128,14 +130,16 @@ export function teamInputs(
       const min = p.mpg_base * scale;
       const loss = ((p.oepm + p.depm - replacementEpm) * min / 48) * playerCarry;
       // odotettu poissaolo-osuus: puolet viime kauden poissaoloista + puolet liigan keskiarvosta (~12 %)
-      const g = prev ? prev.gp : 70;
-      const missMean = Math.min(0.35, Math.max(0.05, 0.5 * (1 - Math.min(82, g) / 82) + 0.5 * 0.12));
+      // odotettu poissaolo-osuus: BBall Indexin durability (inj82), muuten viime kauden poissaoloista
+      const missMean = expectedMissShare(p as any, prev ? prev.gp : null);
       // Tunnetusti poissa oleva: satunnainen lisäpoissaolo vain siltä osin kun hän pelaa.
       const known = Math.min(1, knownMiss[p.name] ?? 0);
-      return { name: p.name, loss, missMean: missMean * (1 - known) };
+      return { name: p.name, loss, missMean: missMean * (1 - known), min };
     });
     contrib.sort((a, b) => b.loss - a.loss);
-    return { ...t, newShare: newMin / tot, stars: contrib.slice(0, 3).filter((s) => s.loss > 0.3) };
+    // Kaikki rotaatiopelaajat (≥ 10 min), joiden poissaolo heikentää joukkuetta.
+    if (!allPlayers) return { ...t, newShare: newMin / tot, stars: contrib.slice(0, 3).filter((s) => s.loss > 0.3) };
+    return { ...t, newShare: newMin / tot, stars: contrib.filter((s) => s.loss > 0.1 && s.min >= 10) };
   });
 }
 

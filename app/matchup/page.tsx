@@ -267,6 +267,8 @@ export default function MatchupPage() {
   const [prevRows, setPrevRows] = useState<PrevRow[]>([]);
   // Liigatason korjaus: kesän muutosten liigakeskiarvo vähennetään (Net-summa on aina 0).
   const [leagueNorm, setLeagueNormState] = useState(true);
+  // Odotetut poissaolot kauden keskitasoon (win total -vertailu, Teams, Kausi). Pois = vanha tapa.
+  const [injuryAdj, setInjuryAdj] = useState(true);
   useEffect(() => {
     try {
       if (localStorage.getItem("matchup_league_norm_v1") === "0") setLeagueNormState(false);
@@ -447,6 +449,7 @@ export default function MatchupPage() {
           if (typeof m.blendWeight === "number") setBlendWeight(m.blendWeight);
           if (m.carry && typeof m.carry.player === "number") setCarry(m.carry);
           if (typeof m.leagueNorm === "boolean") setLeagueNorm(m.leagueNorm);
+          if (typeof m.injuryAdj === "boolean") setInjuryAdj(m.injuryAdj);
           if (typeof m.marketWeight === "number") setMarketWeight(m.marketWeight);
           if (typeof m.paceShift === "number") setPaceShift(m.paceShift);
           if (typeof m.alpha === "number") setAlpha(m.alpha);
@@ -585,7 +588,7 @@ export default function MatchupPage() {
   const darkoCount = players.filter((p: any) => p.darko_o != null).length;
 
   const modelSettings = {
-    blendWeight, carry, leagueNorm, marketWeight, paceShift, alpha, paceAlpha, paceMethod,
+    blendWeight, carry, leagueNorm, injuryAdj, marketWeight, paceShift, alpha, paceAlpha, paceMethod,
     b2bPaceAdj, b2bPenalty, threeInFourPenalty, marginSd, totalSd, ratingSource,
   };
   const modelSettingsJson = JSON.stringify(modelSettings);
@@ -609,8 +612,8 @@ export default function MatchupPage() {
 
   // Kauden lähtötaso (regressio + kesän muutos + win totalit) — sama kuin Teams-sivulla.
   const pre = useMemo(
-    () => computePreseason(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight, paceShift }, undefined, games as any),
-    [teams, players, prevRows, blendWeight, carry, leagueNorm, marketWeight, paceShift, games]
+    () => computePreseason(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight, paceShift, injuryAdj }, undefined, games as any),
+    [teams, players, prevRows, blendWeight, carry, leagueNorm, marketWeight, paceShift, injuryAdj, games]
   );
   const offseasonNorm = { meanO: pre.meanO, meanD: pre.meanD };
   const offseason = pre.offseason;
@@ -712,7 +715,7 @@ export default function MatchupPage() {
   const winTotalView = { rows: pre.winRows };
   const [calib, setCalib] = useState<ReturnType<typeof calibrateCarry> | null>(null);
   function runCalibration() {
-    setCalib(calibrateCarry(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight }, games as any));
+    setCalib(calibrateCarry(teams, players, prevRows, { blendWeight, carry, leagueNorm, marketWeight, injuryAdj }, games as any));
   }
 
   function finalStatsFor(team: TeamStats | undefined) {
@@ -1623,13 +1626,15 @@ export default function MatchupPage() {
                       <td style={{ padding: "4px 10px" }}>{signed(r.model)}</td>
                       <td
                         style={{ padding: "4px 10px", color: "#94a3b8", fontSize: 11 }}
-                        title="Tunnetut pitkät poissaolot (poissa-merkintä + arvioitu paluupäivä), vähennetty mallin Netistä: (arvio − korvaava taso) × min/48 × poissaolo-osuus × pelaajakerroin"
+                        title="Vähennetty mallin Netistä: (arvio − korvaava taso) × min/48 × poissaolo-osuus × pelaajakerroin. Odotetut = satunnaiset poissaolot (oma ennuste inj82 tai oletus ~23/82), tunnetut = poissa-merkintä + arvioitu paluupäivä. Vain erot joukkueiden välillä merkitsevät (keskiarvo vähennetään)."
                       >
                         {(() => {
                           const pr = pre.byTeam[r.team];
-                          if (!pr || !pr.avail || pr.avail.list.length === 0) return "";
-                          const tot = pr.availO + pr.availD;
-                          return `${signed(-tot)} (${pr.avail.list.map((x) => `${x.name.split(" ").slice(-1)[0]} ${Math.round(x.share * 100)} %`).join(", ")})`;
+                          if (!pr) return "";
+                          const known = pr.avail && pr.avail.list.length > 0
+                            ? ` · tunnetut ${signed(-(pr.availO + pr.availD))} (${pr.avail.list.map((x) => `${x.name.split(" ").slice(-1)[0]} ${Math.round(x.share * 100)} %`).join(", ")})`
+                            : "";
+                          return `odotetut ${signed(-(pr.injO + pr.injD))}${known}`;
                         })()}
                       </td>
                       <td style={{ padding: "4px 10px", fontWeight: 700, color: Math.abs(r.diff) >= 3 ? "#f87171" : Math.abs(r.diff) >= 1.5 ? "#fbbf24" : "#94a3b8" }}>
@@ -1743,6 +1748,15 @@ export default function MatchupPage() {
               Joukkueiden Net-lukujen summa on aina 0, joten jos kaikki &quot;paranevat&quot;, se on mallin harha. Päällä: liigan
               keskimääräinen muutos (nyt O {offseasonNorm.meanO >= 0 ? "+" : ""}{offseasonNorm.meanO.toFixed(2)}, D{" "}
               {offseasonNorm.meanD >= 0 ? "+" : ""}{offseasonNorm.meanD.toFixed(2)}) vähennetään jokaiselta.
+            </div>
+            <label style={{ fontSize: 12, color: "#94a3b8", display: "flex", gap: 6, alignItems: "center", marginTop: 14 }}>
+              <input type="checkbox" checked={injuryAdj} onChange={(e) => setInjuryAdj(e.target.checked)} />
+              Odotetut poissaolot kauden tasoon
+            </label>
+            <div style={{ fontSize: 11, color: "#64748b" }}>
+              Päällä: jokaisen rotaatiopelaajan odotetut poissaolot (inj82 tai oletus) vähennetään kauden keskitasosta (win total -vertailu,
+              kalibrointi, Teams) ja arvotaan Kausi-simulaatiossa kaikille rotaatiopelaajille. Pois: vanha tapa (ei vähennystä, simulaatiossa
+              vain 3 tähteä). Ei vaikuta yksittäisiin otteluihin. Vertaa kalibroinnin keskivirhettä kummallakin.
             </div>
           </div>
           <div>

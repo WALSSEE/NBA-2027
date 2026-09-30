@@ -1,4 +1,5 @@
-import { teamAvailability, type TeamAvailability } from "./availability";
+import { teamAvailability, teamInjuryExpectation, type TeamAvailability } from "./availability";
+import { normalizePlayerName } from "./parseTransactions";
 import { computeOffseason, leagueNormalize, canonTeam, type PrevRow, type OffseasonTeam } from "./prevSeason";
 
 // Kauden 26-27 lähtötaso (preseason) — sama laskenta Matchupissa ja Teams-sivulla.
@@ -25,6 +26,7 @@ export type PreSettings = {
   marketWeight: number; // 0–100
   paceShift?: number; // kauden alun tempotason korjaus (possessioita, kaikille joukkueille)
   ratingSource?: "epm" | "darko" | "avg"; // pelaaja-arvioiden lähde
+  injuryAdj?: boolean; // odotetut poissaolot (kaikki rotaatiopelaajat) kauden tasoon ja simulaatioon; oletus päällä
 };
 export const DEFAULT_PRE_SETTINGS: PreSettings = {
   blendWeight: 100,
@@ -79,7 +81,10 @@ export type PreRow = {
   // vaan seasonNet-lukuun, jota käytetään win total -vertailussa ja kausisimulaatiossa.
   availO: number;
   availD: number;
-  seasonNet: number;
+  // Odotetut satunnaiset poissaolot (durability / oletus) kauden keskitasoon (× pelaajakerroin, + = menetys).
+  injO: number;
+  injD: number;
+  seasonNet: number; // net − tunnetut − odotetut poissaolot
   avail?: TeamAvailability;
   off?: OffseasonTeam;
 };
@@ -94,6 +99,9 @@ export function computePreseason(
   games?: { date: string; home: string; away: string; season_type?: string }[] | null
 ) {
   const avail = teamAvailability(players as any, games);
+  const gpMap = new Map<string, number>();
+  for (const r of prevRows) gpMap.set(normalizePlayerName(r.name), (gpMap.get(normalizePlayerName(r.name)) ?? 0) + (Number(r.gp) || 0));
+  const injExp = s.injuryAdj === false ? {} : teamInjuryExpectation(players as any, (n) => gpMap.get(normalizePlayerName(n)) ?? null, avail);
   const usePrev = prevRows.length > 0;
   const raw = rawOffseason ?? (usePrev ? computeOffseason(players as any, prevRows) : {});
   const norm = leagueNormalize(raw);
@@ -146,7 +154,11 @@ export function computePreseason(
       net: ortgBlend + offO - (drtgBlend - offD),
       availO: (avail[t.team]?.o ?? 0) * kpl,
       availD: (avail[t.team]?.d ?? 0) * kpl,
-      seasonNet: ortgBlend + offO - (drtgBlend - offD) - ((avail[t.team]?.o ?? 0) + (avail[t.team]?.d ?? 0)) * kpl,
+      injO: (injExp[t.team]?.o ?? 0) * kpl,
+      injD: (injExp[t.team]?.d ?? 0) * kpl,
+      seasonNet:
+        ortgBlend + offO - (drtgBlend - offD) -
+        ((avail[t.team]?.o ?? 0) + (avail[t.team]?.d ?? 0) + (injExp[t.team]?.o ?? 0) + (injExp[t.team]?.d ?? 0)) * kpl,
       avail: avail[t.team],
       off: base,
     };
@@ -226,6 +238,7 @@ export async function loadPreSettingsRemote(): Promise<PreSettings> {
       marketWeight: typeof m.marketWeight === "number" ? m.marketWeight : local.marketWeight,
       paceShift: typeof m.paceShift === "number" ? m.paceShift : local.paceShift,
       ratingSource: m.ratingSource === "epm" || m.ratingSource === "darko" || m.ratingSource === "avg" ? m.ratingSource : "avg",
+      injuryAdj: typeof m.injuryAdj === "boolean" ? m.injuryAdj : true,
     };
   } catch {
     return local;
