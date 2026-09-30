@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
 import { computePreseason, loadPreSettings, loadPreSettingsRemote, DEFAULT_PRE_SETTINGS, type PreSettings } from "@/lib/preseason";
 import type { PrevRow } from "@/lib/prevSeason";
+import { withRatings } from "@/lib/ratings";
+import SourceCompare from "./SourceCompare";
 
 type TeamStats = {
   id?: string;
@@ -161,7 +163,7 @@ export default function TeamsPage() {
   const pre = useMemo(() => {
     const ts = Object.values(saved).filter((t) => t.ortg_2526 != null || t.ortg_2425 != null);
     if (ts.length === 0 || players.length === 0) return null;
-    return computePreseason(ts, players, prevRows, preSettings);
+    return computePreseason(ts, withRatings(players, preSettings.ratingSource ?? "avg"), prevRows, preSettings);
   }, [saved, players, prevRows, preSettings]);
   const preVal = (team: string, key: SortKey): number | null => {
     const p = pre?.byTeam[team];
@@ -303,6 +305,9 @@ export default function TeamsPage() {
         )}
       </div>
 
+      {!loading && players.length > 0 && (
+        <SourceCompare teams={Object.values(saved) as any} players={players} prevRows={prevRows} settings={preSettings} secret={secret} />
+      )}
       {loading ? (
         <div style={{ color: "#64748b", fontSize: 13 }}>Ladataan...</div>
       ) : (

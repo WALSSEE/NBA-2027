@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { fetchAll } from "@/lib/fetchAll";
 
 export const dynamic = "force-dynamic";
 
@@ -9,7 +10,7 @@ export const dynamic = "force-dynamic";
 // (home_ortg == null), joten sama data käy sekä Matchup- että Games-sivulle.
 export async function GET() {
   const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase.from("schedule").select("*").order("date", { ascending: true });
+  const { data, error } = await fetchAll((a, b) => supabase.from("schedule").select("*").order("date", { ascending: true }).order("id").range(a, b));
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }

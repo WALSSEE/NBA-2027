@@ -22,7 +22,7 @@ export default function GamesPage() {
   const [games, setGames] = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"upcoming" | "played">("upcoming");
+  const [tab, setTab] = useState<"upcoming" | "played" | "pre">("upcoming");
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -39,7 +39,7 @@ export default function GamesPage() {
       });
       const j = await res.json().catch(() => ({ error: `palvelin vastasi ${res.status}` }));
       if (!res.ok || j.ok === false) setMsg(`Virhe: ${j.error ?? res.status}`);
-      else if (kind === "schedule") setMsg(`Otteluohjelma haettu (${j.source}): ${j.total} ottelua, ${j.inserted} tallennettu.${j.notes?.length ? " " + j.notes.join(" · ") : ""}`);
+      else if (kind === "schedule") setMsg(`Otteluohjelma haettu (${j.source}): runkosarja ${j.regular ?? j.total}, harjoituskausi ${j.preseason ?? 0} ottelua, ${j.inserted} tallennettu.${j.notes?.length ? " " + j.notes.join(" · ") : ""}`);
       else setMsg(`Tulokset päivitetty: ${j.updated} ottelua.${j.remainingDays ? ` Päiviä vielä jäljellä ${j.remainingDays} — paina uudelleen.` : ""}`);
       const data = await fetch("/api/schedule").then((r) => r.json());
       setGames(data.games ?? []);
@@ -68,11 +68,14 @@ export default function GamesPage() {
     load();
   }, []);
 
-  const upcoming = useMemo(() => games.filter((g) => g.home_score == null).sort((a, b) => a.date.localeCompare(b.date)), [games]);
+  const isPre = (g: Game) => (g as any).season_type === "pre";
+  const upcoming = useMemo(() => games.filter((g) => !isPre(g) && g.home_score == null).sort((a, b) => a.date.localeCompare(b.date)), [games]);
   const played = useMemo(
-    () => games.filter((g) => g.home_score != null).sort((a, b) => b.date.localeCompare(a.date)),
+    () => games.filter((g) => !isPre(g) && g.home_score != null).sort((a, b) => b.date.localeCompare(a.date)),
     [games]
   );
+  const preseason = useMemo(() => games.filter((g) => isPre(g)).sort((a, b) => a.date.localeCompare(b.date)), [games]);
+  const listed = tab === "upcoming" ? upcoming : tab === "played" ? played : preseason;
 
   return (
     <div style={{ padding: 24, fontFamily: "system-ui", background: "#0f172a", color: "#e2e8f0", minHeight: "100vh" }}>
@@ -129,8 +132,29 @@ export default function GamesPage() {
         >
           Pelatut ({played.length})
         </button>
+        <button
+          onClick={() => setTab("pre")}
+          style={{
+            padding: "6px 14px",
+            fontSize: 13,
+            borderRadius: 6,
+            border: "1px solid #334155",
+            background: tab === "pre" ? "#1e293b" : "transparent",
+            color: "#e2e8f0",
+            cursor: "pointer",
+          }}
+        >
+          Harjoituskausi ({preseason.length})
+        </button>
       </div>
 
+      {tab === "pre" && (
+        <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 10, maxWidth: 820, lineHeight: 1.6 }}>
+          Harjoituspelit eivät vaikuta malliin (EWMA, väsymys, kausisimulaatio). Vedonlyöntiin: valitse ottelu Matchupissa ja paina
+          joukkuepaneelin <strong>Harjoituspeli</strong>-nappia — se rajaa tähtien minuutit ja jakaa loput penkille. Säädä minuutit
+          sen jälkeen tietojesi mukaan (kuka lepää, kuka pelaa).
+        </div>
+      )}
       {loading ? (
         <div style={{ color: "#64748b", fontSize: 13 }}>Ladataan...</div>
       ) : (
@@ -150,7 +174,7 @@ export default function GamesPage() {
             </tr>
           </thead>
           <tbody>
-            {(tab === "upcoming" ? upcoming : played).map((g) => (
+            {listed.map((g) => (
               <tr key={g.id} style={{ borderTop: "1px solid #1e293b" }}>
                 <td style={{ padding: 6 }}>{g.date}</td>
                 <td style={{ padding: 6 }}>{g.home}</td>
@@ -170,7 +194,7 @@ export default function GamesPage() {
                 )}
               </tr>
             ))}
-            {(tab === "upcoming" ? upcoming : played).length === 0 && (
+            {listed.length === 0 && (
               <tr>
                 <td colSpan={6} style={{ padding: 6, color: "#64748b" }}>
                   Ei otteluita tässä kategoriassa.

@@ -23,6 +23,7 @@ export async function GET(request: Request) {
     .gte("date", seasonStart)
     .lt("date", today)
     .is("home_ortg", null)
+    .neq("season_type", "pre") // harjoituspelejä ei käytetä mallissa
     .order("date");
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   const dates = Array.from(new Set((missing ?? []).map((g: any) => g.date))).slice(0, 8);

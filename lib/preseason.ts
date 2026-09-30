@@ -23,6 +23,7 @@ export type PreSettings = {
   leagueNorm: boolean;
   marketWeight: number; // 0–100
   paceShift?: number; // kauden alun tempotason korjaus (possessioita, kaikille joukkueille)
+  ratingSource?: "epm" | "darko" | "avg"; // pelaaja-arvioiden lähde
 };
 export const DEFAULT_PRE_SETTINGS: PreSettings = {
   blendWeight: 100,
@@ -208,6 +209,7 @@ export async function loadPreSettingsRemote(): Promise<PreSettings> {
       leagueNorm: typeof m.leagueNorm === "boolean" ? m.leagueNorm : local.leagueNorm,
       marketWeight: typeof m.marketWeight === "number" ? m.marketWeight : local.marketWeight,
       paceShift: typeof m.paceShift === "number" ? m.paceShift : local.paceShift,
+      ratingSource: m.ratingSource === "epm" || m.ratingSource === "darko" || m.ratingSource === "avg" ? m.ratingSource : "avg",
     };
   } catch {
     return local;

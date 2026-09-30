@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { fetchAll } from "@/lib/fetchAll";
 
 export const dynamic = "force-dynamic";
 
@@ -94,10 +95,9 @@ export async function POST(request: Request) {
 // GET palauttaa kaikki kirjatut transaktiot (uusimmat ensin).
 export async function GET() {
   const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from("transactions")
-    .select("*")
-    .order("created_at", { ascending: false });
+  const { data, error } = await fetchAll((a, b) =>
+    supabase.from("transactions").select("*").order("created_at", { ascending: false }).order("id").range(a, b)
+  );
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });

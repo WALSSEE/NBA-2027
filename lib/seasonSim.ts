@@ -19,12 +19,12 @@ export type SimGame = { home: string; away: string; w: number; result?: "home" |
 // painotettu ohjelma: divisioona 4 peliä, muu konferenssi 3.6 (keskimäärin), toinen konferenssi 2
 // — yhteensä 82, puolet kotona.
 export function buildSchedule(
-  games: { date: string; home: string; away: string; home_score: number | null; away_score: number | null }[],
+  games: { date: string; home: string; away: string; home_score: number | null; away_score: number | null; season_type?: string }[],
   seasonStart: string,
   fatigue = { b2b: 2, threeInFour: 1.5 }
 ) {
-  const season = games.filter((g) => g.date >= seasonStart && TEAM_INFO[g.home] && TEAM_INFO[g.away]);
-  if (season.length >= 1000) {
+  const season = games.filter((g) => g.season_type !== "pre" && g.date >= seasonStart && TEAM_INFO[g.home] && TEAM_INFO[g.away]);
+  if (season.length >= 1150) {
     // Väsymys oikeasta ohjelmasta: B2B = pelasi edellisenä päivänä, 3 peliä / 4 pv = kaksi peliä
     // kolmen edellisen päivän aikana (ei lasketa yhteen B2B:n kanssa) — sama sääntö kuin Matchupissa.
     const dayNum = (d: string) => Math.round(Date.parse(d + "T00:00:00Z") / 86400000);

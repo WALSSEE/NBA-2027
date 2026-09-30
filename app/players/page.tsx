@@ -12,6 +12,8 @@ import {
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
 import { normalizePlayerName } from "@/lib/parseTransactions";
 import { computeOffseason, leagueNormalize, makePlayerFinder, canonTeam, type PrevRow } from "@/lib/prevSeason";
+import { withRatings, parseDarkoCsv, type RatingSource } from "@/lib/ratings";
+import { loadPreSettingsRemote } from "@/lib/preseason";
 
 type DbPlayer = ParsedPlayer & { id: string; updated_at: string };
 
@@ -19,7 +21,44 @@ const ALL_TEAMS = Array.from(new Set(Object.values(TEAM_NAME_BY_ABBR))).sort();
 const LEAGUE_ACCUMULATOR_KEY = "epm_league_accumulator_v1";
 
 export default function PlayersPage() {
-  const [tab, setTab] = useState<"excel" | "site" | "league" | "manual" | "prev">("excel");
+  const [tab, setTab] = useState<"excel" | "site" | "league" | "manual" | "prev" | "darko">("excel");
+  const [ratingSrc, setRatingSrc] = useState<RatingSource>("avg");
+  useEffect(() => {
+    loadPreSettingsRemote().then((s) => setRatingSrc(s.ratingSource ?? "avg"));
+  }, []);
+  // --- DARKO-tuonti ---
+  const [darkoRaw, setDarkoRaw] = useState("");
+  const [darkoStatus, setDarkoStatus] = useState<string | null>(null);
+  const [darkoBusy, setDarkoBusy] = useState(false);
+  async function saveDarko() {
+    const parsed = parseDarkoCsv(darkoRaw);
+    if (parsed.error || parsed.rows.length === 0) {
+      setDarkoStatus(`Virhe: ${parsed.error ?? "ei rivejä"}`);
+      return;
+    }
+    setDarkoBusy(true);
+    setDarkoStatus(null);
+    localStorage.setItem("cron_secret", secret);
+    try {
+      const res = await fetch("/api/players/darko", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+        body: JSON.stringify({ rows: parsed.rows }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) setDarkoStatus(`Virhe: ${j.error ?? res.status}`);
+      else
+        setDarkoStatus(
+          `DARKO tallennettu: ${j.rows} riviä, ${j.updatedPlayers} pelaajariviä päivitetty.` +
+            (j.unmatched?.length ? ` Ei löytynyt kannasta (≥10 mpg, käyttävät EPM:ää): ${j.unmatched.join(", ")}` : "")
+        );
+      await loadCurrent();
+    } catch (e: any) {
+      setDarkoStatus(`Virhe: ${e?.message ?? e}`);
+    } finally {
+      setDarkoBusy(false);
+    }
+  }
 
   // --- Pohja: kauden 25-26 pelatut minuutit (prev_season_minutes) ---
   const [prevRows, setPrevRows] = useState<PrevRow[]>([]);
@@ -470,10 +509,24 @@ export default function PlayersPage() {
         >
           Pohja 25-26
         </button>
+        <button
+          onClick={() => setTab("darko")}
+          style={{
+            padding: "8px 16px",
+            fontSize: 13,
+            background: "transparent",
+            border: "none",
+            borderBottom: tab === "darko" ? "2px solid #2563eb" : "2px solid transparent",
+            color: tab === "darko" ? "#e2e8f0" : "#64748b",
+            cursor: "pointer",
+          }}
+        >
+          DARKO
+        </button>
       </div>
 
       {tab === "prev" && (() => {
-        const raw = computeOffseason(current as any, prevRows);
+        const raw = computeOffseason(withRatings(current as any[], ratingSrc) as any, prevRows);
         const { teams: off, meanO, meanD } = leagueNormalize(raw);
         const teamsSorted = Object.values(off)
           .filter((t) => canonTeam(t.team) && (t.prevMin > 0 || t.roleMin > 0))
@@ -616,6 +669,45 @@ export default function PlayersPage() {
           </div>
         );
       })()}
+
+      {tab === "darko" && (
+        <div style={{ maxWidth: 820, marginBottom: 32 }}>
+          <p style={{ color: "#64748b", fontSize: 13, marginBottom: 12, lineHeight: 1.6 }}>
+            DARKO-luvut (O-DPM / D-DPM) tallennetaan EPM:n rinnalle — EPM-luvut eivät muutu. Matchupin asetuksista valitaan, käyttääkö
+            malli EPM:ää, DARKOa vai niiden keskiarvoa (nyt: <strong>{ratingSrc === "avg" ? "keskiarvo" : ratingSrc.toUpperCase()}</strong>). Pelaaja,
+            jolta DARKO puuttuu, käyttää aina EPM:ää. Lataa DARKOn sivulta leaderboard CSV:nä ja valitse tiedosto tai liitä sen sisältö.
+          </p>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              onChange={async (e) => {
+                const f = e.target.files?.[0];
+                if (f) setDarkoRaw(await f.text());
+              }}
+              style={{ fontSize: 12, color: "#94a3b8" }}
+            />
+            <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="CRON_SECRET" style={{ background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "6px 8px", fontSize: 12, width: 150 }} />
+            <button
+              onClick={saveDarko}
+              disabled={darkoBusy || !secret || !darkoRaw.trim()}
+              style={{ background: "#2563eb", color: "white", border: "none", borderRadius: 6, padding: "7px 14px", fontSize: 12, cursor: "pointer" }}
+            >
+              {darkoBusy ? "Tallennetaan..." : `Tallenna DARKO (${parseDarkoCsv(darkoRaw).rows.length} pelaajaa)`}
+            </button>
+          </div>
+          <textarea
+            value={darkoRaw}
+            onChange={(e) => setDarkoRaw(e.target.value)}
+            placeholder="#,Player,Team,Pos,DPM,ODPM,DDPM,..."
+            style={{ width: "100%", height: 120, background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: 8, fontFamily: "monospace", fontSize: 11 }}
+          />
+          {darkoStatus && <div style={{ fontSize: 12, marginTop: 8, color: darkoStatus.startsWith("Virhe") ? "#f87171" : "#4ade80", lineHeight: 1.6 }}>{darkoStatus}</div>}
+          <div style={{ fontSize: 12, color: "#64748b", marginTop: 8 }}>
+            Kannassa DARKO-luku {current.filter((p: any) => p.darko_o != null).length} / {current.length} pelaajalla.
+          </div>
+        </div>
+      )}
 
       {tab === "manual" && (
         <div style={{ maxWidth: 520, marginBottom: 32 }}>

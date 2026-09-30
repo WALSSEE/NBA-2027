@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { fetchAll } from "@/lib/fetchAll";
 import { normalizePlayerName } from "@/lib/parseTransactions";
 import { looseKey } from "@/lib/prevSeason";
 
@@ -161,7 +162,7 @@ export async function POST(request: Request) {
 // GET palauttaa nykyisen rosterin (esikatselua / debug-tarkoitukseen).
 export async function GET() {
   const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase.from("players").select("*").order("team").order("name");
+  const { data, error } = await fetchAll((a, b) => supabase.from("players").select("*").order("team").order("name").order("id").range(a, b));
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }

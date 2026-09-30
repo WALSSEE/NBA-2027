@@ -6,6 +6,7 @@ import { fairOdds, gameProbabilities, normCdf, pct } from "@/lib/probability";
 import { consensus, bestPrice, usGameDate, type OddsEvent, type BookLines } from "@/lib/odds";
 import { teamMinuteScale, canonTeam, type PrevRow } from "@/lib/prevSeason";
 import { computePreseason, calibrateCarry, WINS_PER_NET } from "@/lib/preseason";
+import { withRatings, RATING_LABEL, type RatingSource } from "@/lib/ratings";
 
 type TeamStats = {
   id: string;
@@ -289,6 +290,8 @@ export default function MatchupPage() {
   // Kausiblendi: oletus 100 % 25-26, oma säätö muistetaan selaimessa.
   const [blendWeight, setBlendWeightState] = useState(DEFAULT_BLEND);
   const [carry, setCarryState] = useState(DEFAULT_CARRY);
+  // Pelaaja-arvioiden lähde: EPM / DARKO / keskiarvo (tallennetaan mallin asetuksiin).
+  const [ratingSource, setRatingSource] = useState<RatingSource>("avg");
   // Kauden alun tempotason korjaus (poss): lisätään jokaisen joukkueen lähtötempoon,
   // hiipuu EWMA:n myötä. Kauden alussa tempo on ollut ~1.2–1.5 poss kauden keskiarvoa
   // korkeampi (2024-25 ja 2025-26), ja liigan pisteet ovat nousseet kausi kaudelta.
@@ -453,6 +456,7 @@ export default function MatchupPage() {
           if (typeof m.threeInFourPenalty === "number") setThreeInFourPenalty(m.threeInFourPenalty);
           if (typeof m.marginSd === "number") setMarginSd(m.marginSd);
           if (typeof m.totalSd === "number") setTotalSd(m.totalSd);
+          if (m.ratingSource === "epm" || m.ratingSource === "darko" || m.ratingSource === "avg") setRatingSource(m.ratingSource);
           setSettingsInfo("Asetukset ladattu tietokannasta.");
         }
       } catch {
@@ -555,7 +559,7 @@ export default function MatchupPage() {
   const gamesByTeam = useMemo(() => {
     const map: Record<string, { date: string; ortg: number; drtg: number; pace: number }[]> = {};
     for (const g of games) {
-      if (g.home_ortg == null || g.away_ortg == null) continue;
+      if (g.home_ortg == null || g.away_ortg == null || (g as any).season_type === "pre") continue;
       (map[g.home] ??= []).push({ date: g.date, ortg: g.home_ortg, drtg: g.home_drtg ?? 0, pace: g.home_pace ?? LEAGUE_AVG_PACE });
       (map[g.away] ??= []).push({ date: g.date, ortg: g.away_ortg, drtg: g.away_drtg ?? 0, pace: g.away_pace ?? LEAGUE_AVG_PACE });
     }
@@ -572,9 +576,16 @@ export default function MatchupPage() {
     const k = t ? minuteScale[t] ?? 1 : 1;
     return Math.round(rawBaseMin(p) * k * 10) / 10;
   };
+  const playersLoaded = players.length > 0;
+  useEffect(() => {
+    if (playersLoaded) setPlayers((prev) => withRatings(prev, ratingSource));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ratingSource, playersLoaded]);
+  const darkoCount = players.filter((p: any) => p.darko_o != null).length;
+
   const modelSettings = {
     blendWeight, carry, leagueNorm, marketWeight, paceShift, alpha, paceAlpha, paceMethod,
-    b2bPaceAdj, b2bPenalty, threeInFourPenalty, marginSd, totalSd,
+    b2bPaceAdj, b2bPenalty, threeInFourPenalty, marginSd, totalSd, ratingSource,
   };
   const modelSettingsJson = JSON.stringify(modelSettings);
   useEffect(() => {
@@ -604,7 +615,7 @@ export default function MatchupPage() {
   const offseason = pre.offseason;
   // Kauden ensimmäinen ottelupäivä otteluohjelmasta. Sitä ennen kirjatut siirrot
   // ovat kesän siirtoja, jotka sisältyvät jo rosteripohjaiseen kesän muutokseen.
-  const seasonStart = useMemo(() => games.reduce((m, g) => (g.date && g.date < m ? g.date : m), "9999-12-31"), [games]);
+  const seasonStart = useMemo(() => games.reduce((m, g) => ((g as any).season_type !== "pre" && g.date && g.date < m ? g.date : m), "9999-12-31"), [games]);
 
   function transactionNetFor(team: string) {
     const teamGames = gamesByTeam[team] ?? [];
@@ -771,7 +782,7 @@ export default function MatchupPage() {
 
   function fatigueAuto(team: string): Fatigue {
     if (!gameDate) return "none";
-    const played = new Set(games.filter((g) => g.home === team || g.away === team).map((g) => g.date));
+    const played = new Set(games.filter((g) => (g as any).season_type !== "pre" && (g.home === team || g.away === team)).map((g) => g.date));
     if (played.has(addDays(gameDate, -1))) return "b2b";
     const last3 = [-1, -2, -3].filter((d) => played.has(addDays(gameDate, d))).length;
     return last3 >= 2 ? "3in4" : "none";
@@ -934,6 +945,32 @@ export default function MatchupPage() {
     setGameMin((prev) => ({ ...prev, ...result }));
   }
 
+  // Harjoituspeli: aloittajat ja rotaation kärki rajataan (oletus 18 min), loput minuutit
+  // jaetaan tasaisemmin koko rosterille (myös oletuksena 0 min pelaaville). Säädä sen jälkeen käsin.
+  function preseasonMinutes(roster: DbPlayer[], cap = 18) {
+    const avail = roster.filter((p) => p.active !== false && !absenceOf(p).out);
+    const byBase = [...avail].sort((a, b) => baseMin(b) - baseMin(a));
+    const top = byBase.slice(0, 8);
+    const rest = byBase.slice(8);
+    const result: Record<string, number> = {};
+    let used = 0;
+    for (const p of top) {
+      const m = Math.min(cap, baseMin(p));
+      result[p.id] = Math.round(m * 10) / 10;
+      used += m;
+    }
+    const left = Math.max(0, 240 - used);
+    if (rest.length > 0) {
+      const each = Math.min(28, left / rest.length);
+      for (const p of rest) result[p.id] = Math.round(each * 10) / 10;
+      used += each * rest.length;
+    }
+    // jos penkkiä ei ole tarpeeksi, jaetaan ylijäämä kärjelle
+    const over = 240 - used;
+    if (over > 0.5 && top.length) for (const p of top) result[p.id] = Math.round((result[p.id] + over / top.length) * 10) / 10;
+    setGameMin((prev) => ({ ...prev, ...result }));
+  }
+
   function resetLineup(team: string, roster: DbPlayer[]) {
     setGameMin((prev) => {
       const next = { ...prev };
@@ -992,6 +1029,13 @@ export default function MatchupPage() {
           </button>
           <button onClick={() => resetLineup(teamName, roster)} style={{ ...smallInput, padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>
             Palauta
+          </button>
+          <button
+            onClick={() => preseasonMinutes(roster)}
+            title="Harjoituspeli: rotaation kärki max 18 min, loput tasaisesti penkille. Säädä sen jälkeen käsin."
+            style={{ ...smallInput, padding: "2px 8px", fontSize: 11, cursor: "pointer", borderColor: "#a78bfa" }}
+          >
+            Harjoituspeli
           </button>
         </div>
 
@@ -1677,6 +1721,18 @@ export default function MatchupPage() {
           <div>
             <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>CRON_SECRET (poissaolojen tallennus)</label>
             <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} style={{ ...smallInput, width: 160, marginBottom: 12 }} />
+            <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>Pelaaja-arviot</label>
+            <select value={ratingSource} onChange={(e) => setRatingSource(e.target.value as RatingSource)} style={{ ...smallInput, width: "100%", marginBottom: 4 }}>
+              {(Object.keys(RATING_LABEL) as RatingSource[]).map((k) => (
+                <option key={k} value={k}>
+                  {RATING_LABEL[k]}
+                </option>
+              ))}
+            </select>
+            <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>
+              DARKO-luku {darkoCount} / {players.length} pelaajalla (tuonti: Players → DARKO). Ilman DARKOa pelaaja käyttää EPM:ää.
+              Aja kalibrointi uudelleen lähteen vaihdon jälkeen.
+            </div>
             <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>Tempokaava</label>
             <select value={paceMethod} onChange={(e) => setPaceMethod(e.target.value as PaceMethod)} style={{ ...smallInput, width: "100%", marginBottom: 4 }}>
               {(Object.keys(PACE_LABEL) as PaceMethod[]).map((m) => (

@@ -3,7 +3,8 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { computePreseason, loadPreSettingsRemote, DEFAULT_PRE_SETTINGS, type PreSettings, type PreTeam } from "@/lib/preseason";
 import type { PrevRow } from "@/lib/prevSeason";
-import { buildSchedule, teamInputs, simulateSeason, marketNets, pOver, type SimResult, type TeamInput } from "@/lib/seasonSim";
+import { withRatings } from "@/lib/ratings";
+import { buildSchedule, teamInputs, simulateSeason, marketNets, pOver, autoSd, type SimResult, type TeamInput } from "@/lib/seasonSim";
 
 const SEASON_START = "2026-10-01";
 
@@ -26,9 +27,8 @@ export default function SeasonPage() {
   const [openTeam, setOpenTeam] = useState<string | null>(null);
   // Markkinan paino kausisimulaatiossa (win totalit). Kausivedoissa markkina on vahva: oletus 70 %.
   const [marketBlend, setMarketBlend] = useState(70);
-  // Joukkuekohtaiset säädöt: lisäepävarmuus (Net) ja tähtien poissaolo-% (tallennetaan tietokantaan)
-  const [extraSd, setExtraSd] = useState<Record<string, number>>({});
-  const [missOv, setMissOv] = useState<Record<string, number>>({});
+  // Joukkuekohtainen varianssi (Net-hajonta), ohittaa automaattisen arvon. Tallennetaan tietokantaan.
+  const [sdOv, setSdOv] = useState<Record<string, number>>({});
   const [ovLoaded, setOvLoaded] = useState(false);
   const [secret, setSecret] = useState("");
   const [used, setUsed] = useState<Record<string, { model: number; market: number | null; used: number }>>({});
@@ -54,8 +54,7 @@ export default function SeasonPage() {
           if (m && typeof m.marginSd === "number") setGameSd(m.marginSd);
           const so = (await fetch("/api/settings").then((x) => x.json()))?.settings?.season;
           if (so) {
-            if (so.extraSd) setExtraSd(so.extraSd);
-            if (so.missOv) setMissOv(so.missOv);
+            if (so.sdOv) setSdOv(so.sdOv);
             if (typeof so.marketBlend === "number") setMarketBlend(so.marketBlend);
           }
         } catch {
@@ -69,7 +68,7 @@ export default function SeasonPage() {
     })();
   }, []);
   // Säätöjen tallennus tietokantaan
-  const ovJson = JSON.stringify({ extraSd, missOv, marketBlend });
+  const ovJson = JSON.stringify({ sdOv, marketBlend });
   useEffect(() => {
     if (!ovLoaded || !secret) return;
     const t = setTimeout(() => {
@@ -85,7 +84,8 @@ export default function SeasonPage() {
   const inputs: TeamInput[] = useMemo(() => {
     if (teams.length === 0 || players.length === 0) return [];
     // Win totalit sekoitetaan tällä sivulla omalla painollaan, joten Matchupin win total -painoa ei käytetä tässä.
-    const pre = computePreseason(teams, players, prevRows, { ...settings, marketWeight: 0 });
+    const rp = withRatings(players, settings.ratingSource ?? "avg");
+    const pre = computePreseason(teams, rp, prevRows, { ...settings, marketWeight: 0 });
     const base = teams
       .filter((t) => pre.byTeam[t.team])
       .map((t) => ({
@@ -95,13 +95,9 @@ export default function SeasonPage() {
         hca: t.home_adv ?? 2.5,
       }));
     const mean = base.reduce((a, t) => a + t.net, 0) / Math.max(1, base.length);
-    const ti = teamInputs(base.map((t) => ({ ...t, net: t.net - mean })), players, prevRows, settings.carry.player / 100);
-    return ti.map((t) => ({
-      ...t,
-      extraSd: extraSd[t.team] ?? 0,
-      stars: t.stars.map((st) => ({ ...st, missMean: missOv[`${t.team}|${st.name}`] ?? st.missMean })),
-    }));
-  }, [teams, players, prevRows, settings, extraSd, missOv]);
+    const ti = teamInputs(base.map((t) => ({ ...t, net: t.net - mean })), rp, prevRows, settings.carry.player / 100);
+    return ti.map((t) => ({ ...t, sdOverride: sdOv[t.team] }));
+  }, [teams, players, prevRows, settings, sdOv]);
   const schedule = useMemo(() => buildSchedule(games, SEASON_START, fatigue), [games, fatigue]);
 
   function run() {
@@ -202,6 +198,12 @@ export default function SeasonPage() {
         {schedule.real
           ? `oikea (${schedule.games.length} ottelua, joista ${schedule.played} pelattu — tulokset kiinteinä). Väsymys ohjelmasta: B2B −${fatigue.b2b} p, 3 peliä / 4 pv −${fatigue.threeInFour} p (${schedule.b2bCount} B2B-tilannetta)`
           : "NBA:n rakenteen mukainen arvio ilman B2B:tä (divisioona 4, konferenssi ~3.6, toinen konferenssi 2 peliä) — hae oikea ohjelma Games-sivun napista, niin simulaatio käyttää sitä ja B2B-rasitusta"}
+        {schedule.real && Math.abs(schedule.games.length - 1230) > 5 && (
+          <span style={{ color: "#f87171" }}>
+            {" "}
+            — HUOM: runkosarjassa pitäisi olla 1230 ottelua. {schedule.games.length > 1230 ? "Ohjelmassa on tuplia — hae ohjelma uudelleen Games-sivulta." : "Ohjelmasta puuttuu otteluita — hae ohjelma uudelleen Games-sivulta."}
+          </span>
+        )}
         {" · "}Asetukset: pelaajat {settings.carry.player} %, jäännös {settings.carry.res} %
         {settings.marketWeight > 0 ? `, win totalit ${settings.marketWeight} %` : ""}.
       </div>
@@ -214,7 +216,7 @@ export default function SeasonPage() {
               <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
                   <tr>
-                    {["#", "Joukkue", "Net", "Loukk.", "Epävarm. ±", "Voitot", "10–90 %", "Win total", "P(over)", "Reilu O / U", `EV over / under @${odds}`, "Top 6", "Play-in", "Pudotuspelit", "1. sija"].map((h) => (
+                    {["#", "Joukkue", "Net", "Loukk.", "Varianssi (Net)", "Epävarm. ±", "Voitot", "10–90 %", "Win total", "P(over)", "Reilu O / U", `EV over / under @${odds}`, "Top 6", "Play-in", "Pudotuspelit", "1. sija"].map((h) => (
                       <th key={h} style={th}>
                         {h}
                       </th>
@@ -236,6 +238,41 @@ export default function SeasonPage() {
                             <td style={{ ...td, color: "#e2e8f0" }}>{r.team}</td>
                             <td style={td}>{r.net >= 0 ? "+" : ""}{r.net.toFixed(1)}</td>
                             <td style={{ ...td, color: r.injuryMean > 1 ? "#fbbf24" : "#94a3b8" }}>−{r.injuryMean.toFixed(1)}</td>
+                            <td style={td} onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="number"
+                                step={0.5}
+                                min={1}
+                                max={6}
+                                value={sdOv[r.team] ?? Number((ti ? autoSd(ti, { baseSd, turnoverSd }) : r.sd).toFixed(1))}
+                                onChange={(e) => {
+                                  const raw = e.target.value;
+                                  setSdOv((x) => {
+                                    const n = { ...x };
+                                    if (raw === "") delete n[r.team];
+                                    else n[r.team] = Math.max(0, Math.min(8, Number(raw) || 0));
+                                    return n;
+                                  });
+                                }}
+                                title="Joukkueen tason epävarmuus Net-pisteinä (1 hajonta). Tyhjä/automaattinen = perustaso + rosterimuutokset."
+                                style={{ ...input, width: 52, borderColor: sdOv[r.team] != null ? "#fbbf24" : "#334155" }}
+                              />
+                              {sdOv[r.team] != null && (
+                                <button
+                                  onClick={() =>
+                                    setSdOv((x) => {
+                                      const n = { ...x };
+                                      delete n[r.team];
+                                      return n;
+                                    })
+                                  }
+                                  title="Palauta automaattinen"
+                                  style={{ background: "transparent", color: "#64748b", border: "none", cursor: "pointer", fontSize: 12 }}
+                                >
+                                  ↺
+                                </button>
+                              )}
+                            </td>
                             <td style={{ ...td, color: r.p90 - r.p10 > 20 ? "#fbbf24" : "#94a3b8" }}>{((r.p90 - r.p10) / 2).toFixed(1)}</td>
                             <td style={{ ...td, fontWeight: 700 }}>{r.meanWins.toFixed(1)}</td>
                             <td style={{ ...td, color: "#94a3b8" }}>
@@ -263,40 +300,18 @@ export default function SeasonPage() {
                           {openTeam === r.team && ti && (
                             <tr>
                               <td />
-                              <td colSpan={14} style={{ padding: "4px 8px 10px", fontSize: 11, color: "#94a3b8", lineHeight: 1.9 }}>
+                              <td colSpan={15} style={{ padding: "4px 8px 10px", fontSize: 11, color: "#94a3b8", lineHeight: 1.9 }}>
                                 <div>
                                   Net: malli {used[r.team] ? signedN(used[r.team].model) : "—"}
                                   {used[r.team]?.market != null ? ` · markkina ${signedN(used[r.team].market!)}` : ""} · käytetty {signedN(r.net)}. Tason epävarmuus ±
                                   {r.sd.toFixed(2)} Net (uusia minuutteja {(ti.newShare * 100).toFixed(0)} %).
                                   {schedule.real ? ` B2B-pelejä ohjelmassa ${schedule.b2bByTeam[r.team] ?? 0}.` : ""}
                                 </div>
-                                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", margin: "4px 0" }} onClick={(e) => e.stopPropagation()}>
-                                  <label>
-                                    Lisäepävarmuus (Net){" "}
-                                    <input
-                                      type="number"
-                                      step={0.5}
-                                      value={extraSd[r.team] ?? 0}
-                                      onChange={(e) => setExtraSd((x) => ({ ...x, [r.team]: Math.max(0, Number(e.target.value) || 0) }))}
-                                      style={{ ...input, width: 54 }}
-                                    />
-                                  </label>
-                                  {ti.stars.map((st) => (
-                                    <label key={st.name}>
-                                      {st.name} poissa %{" "}
-                                      <input
-                                        type="number"
-                                        step={5}
-                                        value={Math.round(st.missMean * 100)}
-                                        onChange={(e) =>
-                                          setMissOv((x) => ({ ...x, [`${r.team}|${st.name}`]: Math.max(0, Math.min(95, Number(e.target.value) || 0)) / 100 }))
-                                        }
-                                        style={{ ...input, width: 50 }}
-                                      />{" "}
-                                      <span style={{ color: "#64748b" }}>(−{st.loss.toFixed(1)} Net kun poissa)</span>
-                                    </label>
-                                  ))}
-                                  <span style={{ color: "#64748b" }}>Muutokset tallentuvat; aja simulaatio uudelleen.</span>
+                                <div>
+                                  Tähtien poissaolot (automaattinen, simulaatiossa arvottu):{" "}
+                                  {ti.stars.length === 0
+                                    ? "ei merkittäviä"
+                                    : ti.stars.map((st) => `${st.name} ~${Math.round(st.missMean * 100)} % peleistä (−${st.loss.toFixed(1)} Net kun poissa)`).join(" · ")}
                                 </div>
                                 <div>
                                   Voittojakauma: {r.winDist.map((x, w) => (x > 0.004 ? `${w}:${(x * 100).toFixed(0)}` : null)).filter(Boolean).join(" ")}
@@ -315,7 +330,10 @@ export default function SeasonPage() {
 
       {results && (
         <div style={{ fontSize: 11, color: "#64748b", maxWidth: 900, lineHeight: 1.7 }}>
-          <strong>Loukk.</strong> = odotettu Net-menetys tähtien poissaoloista (kolme tärkeintä pelaajaa; odotettu poissaolo = puolet viime
+          <strong>Varianssi (Net)</strong> = joukkueen tason epävarmuus (1 hajonta Net-pisteinä); muokattava, keltainen reuna = käsin
+          asetettu, ↺ palauttaa automaattisen. Ohje: 1.5–2 vakaa (sama runko ja valmentaja), 2.5 normaali, 3–3.5 epävarma (uusi valmentaja,
+          paljon uusia pelaajia, nuori joukkue), 4–5 hyvin epävarma (tankkausmahdollisuus, tähden terveys tai kauppa auki). Yksi Net-piste
+          ≈ 2.7 voittoa. Aja simulaatio uudelleen muutosten jälkeen. <strong>Loukk.</strong> = odotettu Net-menetys tähtien poissaoloista (kolme tärkeintä pelaajaa; odotettu poissaolo = puolet viime
           kauden poissaolo-osuudesta + puolet liigan keskiarvosta 12 %, enintään 35 %). <strong>Epävarm. ±</strong> = puolet 10–90 %
           -välin leveydestä voittoina — korkean varianssin joukkueet (tähtiriippuvaiset, paljon uusia pelaajia) keltaisella. Win totalin
           arvo syntyy usein juuri varianssista: korkean varianssin joukkueessa kumpikin puoli voi olla hinnoiteltu väärin, vaikka keskiarvo

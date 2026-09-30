@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
 import TeamUpdate from "./TeamUpdate";
 import { computeOffseason, leagueNormalize, canonTeam, type PrevRow } from "@/lib/prevSeason";
+import { loadPreSettingsRemote } from "@/lib/preseason";
+import { withRatings } from "@/lib/ratings";
 
 type DbPlayer = {
   id: string;
@@ -95,9 +97,10 @@ export default function TransactionsPage() {
   async function loadPlayers() {
     setLoadingPlayers(true);
     try {
-      const res = await fetch("/api/players/import");
+      const [res, st] = await Promise.all([fetch("/api/players/import"), loadPreSettingsRemote()]);
       const data = await res.json();
-      setPlayers(data.players ?? []);
+      // Pelaaja-arviot valitusta lähteestä (EPM / DARKO / keskiarvo), kuten Matchupissa.
+      setPlayers(withRatings(data.players ?? [], st.ratingSource ?? "avg"));
     } catch {
       // ei haittaa
     } finally {

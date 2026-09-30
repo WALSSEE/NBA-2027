@@ -1,6 +1,6 @@
 import { TEAM_NAME_BY_ABBR } from "./teamNames";
 
-export type SchedRow = { game_id: string; date: string; home: string; away: string };
+export type SchedRow = { game_id: string; date: string; home: string; away: string; season_type: "reg" | "pre" };
 
 // ESPN:n lyhenteet, jotka eroavat NBA:n omista.
 const ESPN_ABBR: Record<string, string> = { GS: "GSW", NY: "NYK", SA: "SAS", NO: "NOP", UTAH: "UTA", WSH: "WAS", PHO: "PHX", BRK: "BKN" };
@@ -30,12 +30,14 @@ export async function fetchScheduleCdn(): Promise<SchedRow[]> {
   for (const gd of raw?.leagueSchedule?.gameDates ?? []) {
     for (const g of gd.games ?? []) {
       const id = String(g.gameId ?? "");
-      if (!id.startsWith("002")) continue; // vain runkosarja (NBA Cupin alkulohko kuuluu siihen)
+      // 002 = runkosarja (NBA Cupin alkulohko kuuluu siihen), 001 = harjoituskausi; muut (All-Star, play-in, pudotuspelit) pois
+      const season_type = id.startsWith("002") ? "reg" : id.startsWith("001") ? "pre" : null;
+      if (!season_type) continue;
       const home = teamOf(g.homeTeam?.teamTricode);
       const away = teamOf(g.awayTeam?.teamTricode);
       if (!home || !away) continue;
       const date = String(g.gameDateEst ?? gd.gameDate ?? "").slice(0, 10);
-      rows.push({ game_id: id, date: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : usDate(g.gameDateTimeUTC), home, away });
+      rows.push({ game_id: id, date: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : usDate(g.gameDateTimeUTC), home, away, season_type });
     }
   }
   return rows;
@@ -54,7 +56,7 @@ function isRegularSeason(ev: any): boolean {
 //    rinnakkain). ESPN:n joukkuekohtainen ohjelma on usein vajaa, scoreboard on täydellinen.
 export async function fetchScheduleEspn(seasonEndYear: number): Promise<SchedRow[]> {
   const days: string[] = [];
-  const d = new Date(Date.UTC(seasonEndYear - 1, 9, 15));
+  const d = new Date(Date.UTC(seasonEndYear - 1, 8, 28)); // harjoituskausi alkaa lokakuun alussa
   const end = new Date(Date.UTC(seasonEndYear, 3, 20));
   for (; d <= end; d.setUTCDate(d.getUTCDate() + 1)) days.push(d.toISOString().slice(0, 10));
   const byId = new Map<string, SchedRow>();
@@ -66,14 +68,15 @@ export async function fetchScheduleEspn(seasonEndYear: number): Promise<SchedRow
     for (const r of res) {
       if (r.status !== "fulfilled") continue;
       for (const ev of r.value.j?.events ?? []) {
-        if (!isRegularSeason(ev)) continue; // vain runkosarja (ei harjoituskautta, play-iniä, pudotuspelejä)
+        const pre = ev?.season?.type === 1;
+        if (!pre && !isRegularSeason(ev)) continue; // runkosarja + harjoituskausi (ei play-iniä, pudotuspelejä)
         const cs = ev.competitions?.[0]?.competitors ?? [];
         const h = cs.find((c: any) => c.homeAway === "home");
         const a = cs.find((c: any) => c.homeAway === "away");
         const home = teamOf(h?.team?.abbreviation);
         const away = teamOf(a?.team?.abbreviation);
         if (!home || !away) continue;
-        byId.set(`espn-${ev.id}`, { game_id: `espn-${ev.id}`, date: r.value.day, home, away });
+        byId.set(`espn-${ev.id}`, { game_id: `espn-${ev.id}`, date: r.value.day, home, away, season_type: pre ? "pre" : "reg" });
       }
     }
   }
