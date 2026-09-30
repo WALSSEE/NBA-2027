@@ -55,7 +55,29 @@ export function buildSchedule(
         result: g.home_score != null && g.away_score != null ? (g.home_score > g.away_score ? "home" : "away") : undefined,
       } as SimGame;
     });
-    return { real: true, games: out, b2bCount, b2bByTeam, played: out.filter((g) => g.result).length };
+    // NBA julkaisee 1200 ottelua; loput 30 (2 / joukkue) päätetään NBA Cupin alkulohkon jälkeen.
+    // Täydennetään puuttuvat pelit painotettuina otteluina joukkueiden välillä, joilta pelejä puuttuu,
+    // jotta jokainen pelaa 82 (muuten kaikkien voitot jäävät ~1 alakanttiin).
+    const count: Record<string, number> = {};
+    for (const g of out) { count[g.home] = (count[g.home] ?? 0) + 1; count[g.away] = (count[g.away] ?? 0) + 1; }
+    const teams = Object.keys(TEAM_INFO);
+    const need = teams.map((t) => Math.max(0, 82 - (count[t] ?? 0)));
+    let filled = 0;
+    if (need.some((d) => d > 0) && out.length < 1230) {
+      const x: number[] = need.map((d) => (d > 0 ? 1 : 0));
+      for (let it = 0; it < 200; it++) {
+        const sum = x.reduce((a, v) => a + v, 0);
+        for (let i = 0; i < x.length; i++) if (need[i] > 0) x[i] = Math.sqrt(x[i] * (need[i] / Math.max(1e-9, sum - x[i]))); // vaimennettu (muuten värähtelee)
+      }
+      for (let i = 0; i < teams.length; i++)
+        for (let j = i + 1; j < teams.length; j++) {
+          const w = x[i] * x[j];
+          if (w < 1e-4) continue;
+          out.push({ home: teams[i], away: teams[j], w: w / 2 }, { home: teams[j], away: teams[i], w: w / 2 });
+          filled += w;
+        }
+    }
+    return { real: true, games: out, b2bCount, b2bByTeam, played: out.filter((g) => g.result).length, filled: Math.round(filled), realCount: season.length };
   }
   const teams = Object.keys(TEAM_INFO);
   const out: SimGame[] = [];
@@ -65,7 +87,7 @@ export function buildSchedule(
       const n = a.div === b.div ? 4 : a.conf === b.conf ? 3.6 : 2;
       out.push({ home: teams[i], away: teams[j], w: n / 2 }, { home: teams[j], away: teams[i], w: n / 2 });
     }
-  return { real: false, games: out, b2bCount: 0, b2bByTeam: {} as Record<string, number>, played: 0 };
+  return { real: false, games: out, b2bCount: 0, b2bByTeam: {} as Record<string, number>, played: 0, filled: 0, realCount: 0 };
 }
 
 export type TeamInput = {
@@ -199,7 +221,7 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
         if (Math.random() < p) wins[g.h] += 1;
         else wins[g.a] += 1;
       } else {
-        const k = Math.round(g.w);
+        const k = Math.max(1, Math.round(g.w));
         let hw = 0;
         for (let j = 0; j < k; j++) if (Math.random() < p) hw++;
         const f = g.w / k;

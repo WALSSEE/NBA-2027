@@ -196,12 +196,12 @@ export default function SeasonPage() {
       <div style={{ fontSize: 11, color: "#64748b", marginBottom: 16 }}>
         Otteluohjelma:{" "}
         {schedule.real
-          ? `oikea (${schedule.games.length} ottelua, joista ${schedule.played} pelattu — tulokset kiinteinä). Väsymys ohjelmasta: B2B −${fatigue.b2b} p, 3 peliä / 4 pv −${fatigue.threeInFour} p (${schedule.b2bCount} B2B-tilannetta)`
+          ? `oikea (${schedule.realCount} ottelua${schedule.filled ? ` + ${schedule.filled} NBA Cupin jälkeen päätettävää peliä täydennetty painotettuina` : ""}, joista ${schedule.played} pelattu — tulokset kiinteinä). Väsymys ohjelmasta: B2B −${fatigue.b2b} p, 3 peliä / 4 pv −${fatigue.threeInFour} p (${schedule.b2bCount} B2B-tilannetta)`
           : "NBA:n rakenteen mukainen arvio ilman B2B:tä (divisioona 4, konferenssi ~3.6, toinen konferenssi 2 peliä) — hae oikea ohjelma Games-sivun napista, niin simulaatio käyttää sitä ja B2B-rasitusta"}
-        {schedule.real && Math.abs(schedule.games.length - 1230) > 5 && (
+        {schedule.real && (schedule.realCount > 1235 || schedule.realCount < 1195) && (
           <span style={{ color: "#f87171" }}>
             {" "}
-            — HUOM: runkosarjassa pitäisi olla 1230 ottelua. {schedule.games.length > 1230 ? "Ohjelmassa on tuplia — hae ohjelma uudelleen Games-sivulta." : "Ohjelmasta puuttuu otteluita — hae ohjelma uudelleen Games-sivulta."}
+            — HUOM: runkosarjassa pitäisi olla 1230 ottelua. {schedule.realCount > 1230 ? "Ohjelmassa on tuplia — hae ohjelma uudelleen Games-sivulta." : "Ohjelmasta puuttuu otteluita — hae ohjelma uudelleen Games-sivulta."}
           </span>
         )}
         {" · "}Asetukset: pelaajat {settings.carry.player} %, jäännös {settings.carry.res} %
