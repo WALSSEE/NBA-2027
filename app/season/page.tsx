@@ -4,6 +4,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { computePreseason, loadPreSettingsRemote, DEFAULT_PRE_SETTINGS, type PreSettings, type PreTeam } from "@/lib/preseason";
 import type { PrevRow } from "@/lib/prevSeason";
 import { withRatings } from "@/lib/ratings";
+import { WINS_PER_NET } from "@/lib/preseason";
 import { buildSchedule, teamInputs, simulateSeason, marketNets, pOver, autoSd, type SimResult, type TeamInput } from "@/lib/seasonSim";
 
 const SEASON_START = "2026-10-01";
@@ -107,14 +108,22 @@ export default function SeasonPage() {
       const lines: Record<string, number> = {};
       for (const t of teams) if (t.win_total != null) lines[t.team] = Number(t.win_total);
       const w = marketBlend / 100;
-      const mk = w > 0 && Object.keys(lines).length >= 20 ? marketNets(inputs, schedule.games, lines, opt) : {};
-      const mkVals = Object.values(mk);
-      const mkMean = mkVals.length ? mkVals.reduce((a, x) => a + x, 0) / mkVals.length : 0;
+      // Blendaus tehdään voittojen asteikolla: tavoite = w × win total + (1 − w) × mallin voitot
+      // (41 + 2.7 × Net). Sitten haetaan simulaatiolla Netit, joilla simuloitu keskiarvo osuu
+      // tavoitteeseen — sama inflaatio (varianssi, loukkaantumiset) koskee sekä markkinaa että mallia.
+      // (Aiemmin markkinan kalibroitu Net ja mallin raaka Net blendattiin suoraan, mikä puristi kärki- ja
+      // häntäjoukkueita kohti keskikastia.)
+      const modelMean = inputs.reduce((a, t) => a + t.net, 0) / Math.max(1, inputs.length);
+      const targets: Record<string, number> = {};
+      for (const t of inputs) {
+        const modelWins = 41 + WINS_PER_NET * (t.net - modelMean);
+        targets[t.team] = lines[t.team] != null ? w * lines[t.team] + (1 - w) * modelWins : modelWins;
+      }
+      const mk = w > 0 && Object.keys(lines).length >= 20 ? marketNets(inputs, schedule.games, targets, opt) : {};
       const u: Record<string, { model: number; market: number | null; used: number }> = {};
       const blended = inputs.map((t) => {
-        const m = mk[t.team] != null ? mk[t.team] - mkMean : null;
-        const net = m != null ? (1 - w) * t.net + w * m : t.net;
-        u[t.team] = { model: t.net, market: m, used: net };
+        const net = mk[t.team] != null ? mk[t.team] : t.net;
+        u[t.team] = { model: t.net - modelMean, market: lines[t.team] != null ? (lines[t.team] - 41) / WINS_PER_NET : null, used: net };
         return { ...t, net };
       });
       setUsed(u);

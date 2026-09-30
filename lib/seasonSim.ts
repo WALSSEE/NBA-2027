@@ -301,8 +301,8 @@ export function marketNets(inputs: TeamInput[], schedule: SimGame[], lines: Reco
     const line = lines[t.team];
     return { ...t, net: line != null ? (line - 41) / 2.7 + inj : t.net };
   });
-  for (let it = 0; it < 4; it++) {
-    const res = simulateSeason(cur, schedule, { ...opt, sims: 1200 });
+  for (let it = 0; it < 5; it++) {
+    const res = simulateSeason(cur, schedule, { ...opt, sims: it < 3 ? 1500 : 3000 });
     res.forEach((r, i) => {
       const line = lines[r.team];
       if (line != null) cur[i].net += (line - r.meanWins) / 2.7;
