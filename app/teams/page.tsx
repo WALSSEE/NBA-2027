@@ -19,9 +19,12 @@ type TeamStats = {
   coach_change: boolean | null;
   home_adv: number | null;
   win_total: number | null;
+  wt_line?: number | null; // vedonlyöntilinja (esim. 43.5)
+  wt_over?: number | null; // kerroin yli
+  wt_under?: number | null; // kerroin alle
 };
 
-type NumField = "ortg_2425" | "drtg_2425" | "pace_2425" | "ortg_2526" | "drtg_2526" | "pace_2526" | "home_adv" | "win_total";
+type NumField = "ortg_2425" | "drtg_2425" | "pace_2425" | "ortg_2526" | "drtg_2526" | "pace_2526" | "home_adv" | "win_total" | "wt_line" | "wt_over" | "wt_under";
 type SortKey = "team" | "net_2425" | "net_2526" | "net_change" | "off_o" | "off_d" | "off_net" | "pre_ortg" | "pre_drtg" | "pre_net" | NumField;
 
 const ALL_TEAMS = Array.from(new Set(Object.values(TEAM_NAME_BY_ABBR))).sort();
@@ -38,6 +41,9 @@ function emptyRow(team: string): TeamStats {
     coach_change: false,
     home_adv: null,
     win_total: null,
+    wt_line: null,
+    wt_over: null,
+    wt_under: null,
   };
 }
 
@@ -353,7 +359,10 @@ export default function TeamsPage() {
                 <SortHeader k="net_change" label="Δ Net" title="Net Ratingin muutos 24-25 → 25-26" />
                 <th style={{ padding: "6px 4px", color: "#94a3b8" }}>Coach</th>
                 <SortHeader k="home_adv" label="HCA" />
-                <SortHeader k="win_total" label="Win total" title="Markkinan runkosarjan voittoraja 26-27 (Matchup vertaa malliin)" />
+                <SortHeader k="win_total" label="Odot. voitot" title="Markkinan odotetut voitot 26-27 (linjasta ja kertoimista, marginaali poistettu). Malli kalibroidaan ja blendataan näihin." />
+                <SortHeader k="wt_line" label="Linja" title="Vedonlyöntilinja (Kausi-sivun EV lasketaan tätä vastaan)" />
+                <SortHeader k="wt_over" label="Yli" title="Kerroin yli" />
+                <SortHeader k="wt_under" label="Alle" title="Kerroin alle" />
                 <th />
               </tr>
             </thead>
@@ -401,6 +410,9 @@ export default function TeamsPage() {
                     </td>
                     {numInput(team, "home_adv", row.home_adv)}
                     {numInput(team, "win_total", row.win_total)}
+                    {numInput(team, "wt_line", row.wt_line ?? null)}
+                    {numInput(team, "wt_over", row.wt_over ?? null)}
+                    {numInput(team, "wt_under", row.wt_under ?? null)}
                     <td style={{ padding: 2 }}>
                       <button
                         onClick={() => saveTeam(team)}

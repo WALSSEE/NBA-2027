@@ -137,16 +137,22 @@ export default function SeasonPage() {
     }, 20);
   }
 
+  // Vedonlyöntilinja ja kertoimet (Teams-sivu); ilman linjaa käytetään odotettuja voittoja ja yleistä kerrointa.
   const winTotal = (team: string) => {
-    const t = teams.find((x) => x.team === team);
+    const t = teams.find((x) => x.team === team) as any;
+    if (t?.wt_line != null) return Number(t.wt_line);
     return t?.win_total != null ? Number(t.win_total) : null;
+  };
+  const oddsOf = (team: string) => {
+    const t = teams.find((x) => x.team === team) as any;
+    return { over: t?.wt_over != null ? Number(t.wt_over) : odds, under: t?.wt_under != null ? Number(t.wt_under) : odds, own: t?.wt_over != null };
   };
   const inp = (team: string) => inputs.find((x) => x.team === team);
   const signedN = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(1)}`;
   const pctS = (p: number) => `${(p * 100).toFixed(p < 0.1 && p > 0 ? 1 : 0)} %`;
   const fair = (p: number) => (p <= 0.001 ? "—" : (1 / p).toFixed(2));
-  const evS = (p: number) => {
-    const ev = p * odds - 1;
+  const evS = (p: number, o: number = odds) => {
+    const ev = p * o - 1;
     return <span style={{ color: ev > 0.03 ? "#4ade80" : ev > 0 ? "#a3e635" : "#64748b", fontWeight: ev > 0.03 ? 700 : 400 }}>{(ev * 100).toFixed(1)} %</span>;
   };
   const input = { background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "4px 6px", fontSize: 12, width: 64 };
@@ -195,7 +201,7 @@ export default function SeasonPage() {
           <input type="number" step={10} min={0} max={100} value={marketBlend} onChange={(e) => setMarketBlend(Math.max(0, Math.min(100, Number(e.target.value) || 0)))} style={input} />
         </label>
         <label>
-          Win total -kerroin
+          Oletuskerroin (ilman omaa)
           <br />
           <input type="number" step={0.01} value={odds} onChange={(e) => setOdds(Number(e.target.value) || 1.91)} style={input} />
         </label>
@@ -230,7 +236,7 @@ export default function SeasonPage() {
               <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
                   <tr>
-                    {["#", "Joukkue", "Net", "Loukk.", "Varianssi (Net)", "Epävarm. ±", "Voitot", "10–90 %", "Win total", "P(over)", "Reilu O / U", `EV over / under @${odds}`, "Top 6", "Play-in", "Pudotuspelit", "1. sija"].map((h) => (
+                    {["#", "Joukkue", "Net", "Loukk.", "Varianssi (Net)", "Epävarm. ±", "Voitot", "10–90 %", "Linja (yli / alle)", "P(over)", "Reilu O / U", "EV over / under", "Top 6", "Play-in", "Pudotuspelit", "1. sija"].map((h) => (
                       <th key={h} style={th}>
                         {h}
                       </th>
@@ -292,13 +298,21 @@ export default function SeasonPage() {
                             <td style={{ ...td, color: "#94a3b8" }}>
                               {Math.round(r.p10)}–{Math.round(r.p90)}
                             </td>
-                            <td style={td}>{wt ?? "—"}</td>
+                            <td style={td}>
+                              {wt ?? "—"}
+                              {oddsOf(r.team).own && (
+                                <span style={{ color: "#64748b", fontSize: 11 }}>
+                                  {" "}
+                                  ({oddsOf(r.team).over.toFixed(2)} / {oddsOf(r.team).under.toFixed(2)})
+                                </span>
+                              )}
+                            </td>
                             <td style={td}>{po != null ? pctS(po) : "—"}</td>
                             <td style={{ ...td, color: "#94a3b8" }}>{po != null ? `${fair(po)} / ${fair(1 - po)}` : "—"}</td>
                             <td style={td}>
                               {po != null ? (
                                 <>
-                                  {evS(po)} / {evS(1 - po)}
+                                  {evS(po, oddsOf(r.team).over)} / {evS(1 - po, oddsOf(r.team).under)}
                                 </>
                               ) : (
                                 "—"

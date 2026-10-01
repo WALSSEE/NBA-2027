@@ -39,6 +39,9 @@ export async function POST(request: Request) {
     "drtg_2526",
     "home_adv",
     "win_total",
+    "wt_line",
+    "wt_over",
+    "wt_under",
   ] as const;
 
   const update: Record<string, any> = {};
