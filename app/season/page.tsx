@@ -348,6 +348,7 @@ export default function SeasonPage() {
                                 <div>
                                   Voittojakauma: {r.winDist.map((x, w) => (x > 0.004 ? `${w}:${(x * 100).toFixed(0)}` : null)).filter(Boolean).join(" ")}
                                 </div>
+                                <AltLines r={r} line={wt} />
                               </td>
                             </tr>
                           )}
@@ -375,3 +376,76 @@ export default function SeasonPage() {
     </div>
   );
 }
+
+// Vaihtoehtoiset O/U-linjat: simulaation P(yli) ja reilut kertoimet usealle linjalle sekä oma linja kertoimineen -> EV.
+function AltLines({ r, line }: { r: SimResult; line: number | null }) {
+  const [cl, setCl] = useState<string>("");
+  const [co, setCo] = useState<string>("");
+  const [cu, setCu] = useState<string>("");
+  const center = Math.floor(line ?? r.meanWins);
+  const lines: number[] = [];
+  for (let k = -6; k <= 6; k++) lines.push(center + 0.5 + k);
+  const fair = (p: number) => (p <= 0.001 ? "—" : (1 / p).toFixed(2));
+  const cell = { padding: "1px 8px", textAlign: "right" as const, fontVariantNumeric: "tabular-nums" as const };
+  const L = parseFloat(cl.replace(",", "."));
+  const O = parseFloat(co.replace(",", "."));
+  const U = parseFloat(cu.replace(",", "."));
+  const pO = Number.isFinite(L) ? pOver(r, L) : null;
+  // tasaluku: push palauttaa panoksen -> EV lasketaan ilman push-todennäköisyyttä
+  const pPush = Number.isFinite(L) && Number.isInteger(L) ? r.winDist[L] ?? 0 : 0;
+  const ev = (p: number, o: number) => p * o + pPush - 1;
+  const evStyle = (v: number) => ({ color: v > 0.03 ? "#4ade80" : v > 0 ? "#a3e635" : "#64748b", fontWeight: v > 0.03 ? 700 : 400 });
+  const inp = { background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, padding: "2px 6px", fontSize: 11, width: 60 };
+  return (
+    <div style={{ marginTop: 6 }} onClick={(e) => e.stopPropagation()}>
+      <div style={{ color: "#cbd5e1" }}>Vaihtoehtoiset linjat (simulaatio):</div>
+      <table style={{ borderCollapse: "collapse", fontSize: 11 }}>
+        <thead>
+          <tr style={{ color: "#64748b" }}>
+            <th style={cell}>Linja</th>
+            <th style={cell}>P(yli)</th>
+            <th style={cell}>Reilu yli</th>
+            <th style={cell}>Reilu alle</th>
+          </tr>
+        </thead>
+        <tbody>
+          {lines.map((l) => {
+            const p = pOver(r, l);
+            return (
+              <tr key={l} style={{ color: l === line ? "#e2e8f0" : "#94a3b8", fontWeight: l === line ? 700 : 400 }}>
+                <td style={cell}>{l.toFixed(1)}</td>
+                <td style={cell}>{(p * 100).toFixed(0)} %</td>
+                <td style={cell}>{fair(p)}</td>
+                <td style={cell}>{fair(1 - p)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
+        <span>Oma linja:</span>
+        <input value={cl} onChange={(e) => setCl(e.target.value)} placeholder="esim. 38.5" style={inp} />
+        <span>yli</span>
+        <input value={co} onChange={(e) => setCo(e.target.value)} placeholder="kerroin" style={inp} />
+        <span>alle</span>
+        <input value={cu} onChange={(e) => setCu(e.target.value)} placeholder="kerroin" style={inp} />
+        {pO != null && (
+          <span>
+            P(yli) {(pO * 100).toFixed(1)} %{pPush > 0 ? ` · push ${(pPush * 100).toFixed(1)} %` : ""} · reilu {fair(pO)} / {fair(1 - pO - pPush)}
+            {Number.isFinite(O) && (
+              <>
+                {" "}· EV yli <span style={evStyle(ev(pO, O))}>{(ev(pO, O) * 100).toFixed(1)} %</span>
+              </>
+            )}
+            {Number.isFinite(U) && (
+              <>
+                {" "}· EV alle <span style={evStyle(ev(1 - pO - pPush, U))}>{(ev(1 - pO - pPush, U) * 100).toFixed(1)} %</span>
+              </>
+            )}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
