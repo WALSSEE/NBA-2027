@@ -116,8 +116,12 @@ export default function SeasonPage() {
       // tavoitteeseen — sama inflaatio (varianssi, loukkaantumiset) koskee sekä markkinaa että mallia.
       // (Aiemmin markkinan kalibroitu Net ja mallin raaka Net blendattiin suoraan, mikä puristi kärki- ja
       // häntäjoukkueita kohti keskikastia.)
-      // Mallin odotettu taso = Net − odotetut poissaolot (sama, jonka simulaatio arpoo).
-      const expNet = (t: TeamInput) => t.net - t.stars.reduce((a, st) => a + st.loss * st.missMean, 0);
+      // Mallin odotettu taso voittoina. Kun odotetut poissaolot ovat pois päältä, mallin Net on kalibroitu
+      // suoraan markkinan win totaleihin (poissaolot sisältyvät kalibrointiin), joten niitä EI vähennetä
+      // uudelleen — muuten hyvät joukkueet painuvat alle ja huonot yli. Päällä: Net on terve taso ja
+      // odotetut poissaolot vähennetään (sama, jonka simulaatio arpoo).
+      const injOn = settings.injuryAdj !== false;
+      const expNet = (t: TeamInput) => t.net - (injOn ? t.stars.reduce((a, st) => a + st.loss * st.missMean, 0) : 0);
       const modelMean = inputs.reduce((a, t) => a + expNet(t), 0) / Math.max(1, inputs.length);
       const targets: Record<string, number> = {};
       for (const t of inputs) {
