@@ -1632,9 +1632,9 @@ export default function MatchupPage() {
                           const pr = pre.byTeam[r.team];
                           if (!pr) return "";
                           const known = pr.avail && pr.avail.list.length > 0
-                            ? ` · tunnetut ${signed(-(pr.availO + pr.availD))} (${pr.avail.list.map((x) => `${x.name.split(" ").filter((w) => !/^(Jr\.?|Sr\.?|II|III|IV)$/i.test(w)).slice(-1)[0]} ${Math.round(x.share * 100)} %${x.until ? "" : " (ei paluupv.)"}`).join(", ")})`
+                            ? `${injuryAdj ? " · " : ""}tunnetut ${signed(-(pr.availO + pr.availD))} (${pr.avail.list.map((x) => `${x.name.split(" ").filter((w) => !/^(Jr\.?|Sr\.?|II|III|IV)$/i.test(w)).slice(-1)[0]} ${Math.round(x.share * 100)} %${x.until ? "" : " (ei paluupv.)"}`).join(", ")})`
                             : "";
-                          return `odotetut ${signed(-(pr.injO + pr.injD))}${known}`;
+                          return `${injuryAdj ? `odotetut ${signed(-(pr.injO + pr.injD))}` : ""}${known}`;
                         })()}
                       </td>
                       <td style={{ padding: "4px 10px", fontWeight: 700, color: Math.abs(r.diff) >= 3 ? "#f87171" : Math.abs(r.diff) >= 1.5 ? "#fbbf24" : "#94a3b8" }}>

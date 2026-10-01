@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { TEAM_NAME_BY_ABBR } from "@/lib/teamNames";
 import { parseTeamTransactions, normalizePlayerName, type ParsedMove } from "@/lib/parseTransactions";
-import { ROOKIE_PRESETS } from "@/lib/rookies";
+import { ROOKIE_PRESETS, rookieByPick } from "@/lib/rookies";
 import { TEAM_GAMES, looseKey, computeOffseason, leagueNormalize, type PrevRow } from "@/lib/prevSeason";
 
 export type DbPlayer = {
@@ -736,7 +736,24 @@ export default function TeamUpdate({
                 Uusi pelaaja, jota ei vielä ole kannassa. Tallennus luo hänet joukkueeseen {team} ja kirjaa hänen vaikutuksensa
                 (raaka EPM × minuutit / 48) joukkueen lukuihin.
               </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8, alignItems: "center" }}>
+                <label style={{ fontSize: 11, color: "#94a3b8" }}>Varausnumero</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={60}
+                  placeholder="1–60"
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value);
+                    if (v >= 1) {
+                      const r = rookieByPick(v);
+                      setRkO(r.o);
+                      setRkD(r.d);
+                    }
+                  }}
+                  title="Asettaa O/D tulokaskauden arvion mukaan: O = 0.6 − 0.75·ln(varaus), D = −0.5 (2025 luokan data). 2. kierros / varaamaton: ~45–60."
+                  style={{ ...inputBase, padding: "3px 6px", width: 56 }}
+                />
                 {ROOKIE_PRESETS.map((pr) => (
                   <button
                     key={pr.label}

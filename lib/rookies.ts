@@ -1,7 +1,16 @@
-// Tulokkaiden oletus-EPM varausnumeron mukaan (karkea arvio, raaka per 100 poss).
+// Tulokkaan tulokaskauden arvio varausnumerosta (per 100 poss, EPM/DARKO-asteikko).
+// Sovitettu kauden 2025 draftiluokan (25 pelaajaa) tulokaskauden EPM/DARKO-keskiarvoihin:
+// O ≈ 0.8 − 0.8·ln(varaus), D ≈ −0.5 (puolustusta ei ennustanut mikään). Yliopiston BPM+ ei
+// parantanut ennustetta varausnumeron lisäksi. Kärkeä kutistettu hieman (yksi luokka, vahva top-3).
+export function rookieByPick(pick: number): { o: number; d: number } {
+  const p = Math.min(60, Math.max(1, Math.round(pick || 60)));
+  const o = 0.6 - 0.75 * Math.log(p);
+  return { o: Math.round(o * 100) / 100, d: -0.5 };
+}
+
 export const ROOKIE_PRESETS = [
-  { label: "Top-5 (−1.5)", o: -0.75, d: -0.75 },
-  { label: "Lotto 6-14 (−2.5)", o: -1.5, d: -1.0 },
-  { label: "Myöh. 1. kierros (−3.0)", o: -1.75, d: -1.25 },
-  { label: "2. kierros (−3.5)", o: -2.0, d: -1.5 },
+  { label: "Varaus 3 (−0.7)", ...rookieByPick(3) },
+  { label: "Varaus 10 (−1.6)", ...rookieByPick(10) },
+  { label: "Varaus 20 (−2.1)", ...rookieByPick(20) },
+  { label: "2. kierros / varaamaton (−2.8)", ...rookieByPick(45) },
 ];

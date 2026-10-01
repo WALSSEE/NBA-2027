@@ -1,6 +1,7 @@
 "use client";
 
 import { parseInjuryTable } from "@/lib/availability";
+import { ROOKIE_PRESETS, rookieByPick } from "@/lib/rookies";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   parsePlayersPaste,
@@ -22,7 +23,7 @@ const ALL_TEAMS = Array.from(new Set(Object.values(TEAM_NAME_BY_ABBR))).sort();
 const LEAGUE_ACCUMULATOR_KEY = "epm_league_accumulator_v1";
 
 export default function PlayersPage() {
-  const [tab, setTab] = useState<"excel" | "site" | "league" | "manual" | "prev" | "darko" | "inj">("excel");
+  const [tab, setTab] = useState<"excel" | "site" | "league" | "manual" | "prev" | "darko" | "inj" | "rookies">("excel");
   const [ratingSrc, setRatingSrc] = useState<RatingSource>("avg");
   useEffect(() => {
     loadPreSettingsRemote().then((s) => setRatingSrc(s.ratingSource ?? "avg"));
@@ -67,6 +68,30 @@ export default function PlayersPage() {
   const [injBusy, setInjBusy] = useState(false);
   const abbrToTeam = (a: string) => TEAM_NAME_BY_ABBR[({ BRK: "BKN", CHO: "CHA", PHO: "PHX" } as Record<string, string>)[a] ?? a] ?? null;
   const [injTeam, setInjTeam] = useState("");
+  // --- Tulokkaat (draft_pick) ---
+  const [rkStatus, setRkStatus] = useState<string | null>(null);
+  async function savePlayerFields(p: any, patch: Record<string, unknown>) {
+    if (!secret) {
+      setRkStatus("Virhe: syötä CRON_SECRET ensin.");
+      return;
+    }
+    localStorage.setItem("cron_secret", secret);
+    const res = await fetch("/api/players/status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+      body: JSON.stringify({ playerId: p.id, ...patch }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setRkStatus(`Virhe: ${j.error ?? res.status}`);
+      return;
+    }
+    const map: Record<string, string> = { oepm: "oepm", depm: "depm", mpgBase: "mpg_base", draftPick: "draft_pick", team: "team", active: "active" };
+    const local: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(patch)) local[map[k] ?? k] = v;
+    setCurrent((prev) => prev.map((x: any) => (x.id === p.id ? { ...x, ...local } : x)));
+    setRkStatus(`${p.name} tallennettu.`);
+  }
   async function saveInjOne(p: any, raw: string) {
     const val = raw.trim() === "" ? null : Number(raw.replace(",", "."));
     const cur = p.inj82 == null ? null : Number(p.inj82);
@@ -594,6 +619,20 @@ export default function PlayersPage() {
         >
           Poissaoloriski
         </button>
+        <button
+          onClick={() => setTab("rookies")}
+          style={{
+            padding: "8px 16px",
+            fontSize: 13,
+            background: "transparent",
+            border: "none",
+            borderBottom: tab === "rookies" ? "2px solid #2563eb" : "2px solid transparent",
+            color: tab === "rookies" ? "#e2e8f0" : "#64748b",
+            cursor: "pointer",
+          }}
+        >
+          Tulokkaat 2026
+        </button>
       </div>
 
       {tab === "prev" && (() => {
@@ -872,6 +911,97 @@ export default function PlayersPage() {
         </div>
       )}
 
+      {tab === "rookies" && (
+        <div style={{ maxWidth: 900, marginBottom: 32 }}>
+          <p style={{ color: "#64748b", fontSize: 13, marginBottom: 12, lineHeight: 1.6 }}>
+            Pelaajat, joilla on varausnumero (supabase/add_rookies_2026.sql). Arvio O = 0.6 − 0.75·ln(varaus), D = −0.5 (2025 luokan
+            tulokaskauden EPM/DARKO). Kaikkia lukuja voi muokata: varausnumeron muutos laskee O/D:n uudelleen kaavasta, O/D/minuutit
+            voi myös kirjoittaa suoraan. Tallentuu, kun painat Enter tai klikkaat pois kentästä.
+          </p>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
+            <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="CRON_SECRET" style={{ background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "6px 8px", fontSize: 12, width: 150 }} />
+            {rkStatus && <span style={{ fontSize: 12, color: rkStatus.startsWith("Virhe") ? "#f87171" : "#4ade80" }}>{rkStatus}</span>}
+          </div>
+          {current.filter((p: any) => p.draft_pick != null).length === 0 ? (
+            <div style={{ fontSize: 12, color: "#fbbf24" }}>Ei tulokkaita — aja supabase/add_rookies_2026.sql Supabasessa ja päivitä sivu.</div>
+          ) : (
+            <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ color: "#94a3b8", textAlign: "left" }}>
+                  {["Varaus", "Pelaaja", "Joukkue", "O", "D", "Yht.", "Min", "Aktiivinen"].map((h) => (
+                    <th key={h} style={{ padding: "4px 8px" }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {current
+                  .filter((p: any) => p.draft_pick != null)
+                  .sort((a: any, b: any) => a.draft_pick - b.draft_pick)
+                  .map((p: any) => {
+                    const inp = { background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, padding: "2px 6px", fontSize: 12 } as const;
+                    const numField = (val: number, field: string, width = 60, step = "0.1") => (
+                      <input
+                        key={`${p.id}-${field}-${val}`}
+                        type="number"
+                        step={step}
+                        defaultValue={val}
+                        onBlur={(e) => {
+                          const v = parseFloat(e.target.value.replace(",", "."));
+                          if (!Number.isFinite(v) || v === val) return;
+                          savePlayerFields(p, { [field]: v });
+                        }}
+                        onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+                        style={{ ...inp, width }}
+                      />
+                    );
+                    const tot = Number(p.oepm) + Number(p.depm);
+                    return (
+                      <tr key={p.id} style={{ borderTop: "1px solid #1f2937" }}>
+                        <td style={{ padding: "3px 8px" }}>
+                          <input
+                            key={`${p.id}-pick-${p.draft_pick}`}
+                            type="number"
+                            min={1}
+                            max={60}
+                            defaultValue={p.draft_pick}
+                            onBlur={(e) => {
+                              const v = parseInt(e.target.value);
+                              if (!(v >= 1 && v <= 60) || v === p.draft_pick) return;
+                              const r = rookieByPick(v);
+                              savePlayerFields(p, { draftPick: v, oepm: r.o, depm: r.d });
+                            }}
+                            onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+                            style={{ ...inp, width: 48 }}
+                          />
+                        </td>
+                        <td style={{ padding: "3px 8px" }}>{p.name}</td>
+                        <td style={{ padding: "3px 8px" }}>
+                          <select value={p.team} onChange={(e) => savePlayerFields(p, { team: e.target.value })} style={{ ...inp, width: 170 }}>
+                            {ALL_TEAMS.map((t) => (
+                              <option key={t} value={t}>
+                                {t}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td style={{ padding: "3px 8px" }}>{numField(Number(p.oepm), "oepm")}</td>
+                        <td style={{ padding: "3px 8px" }}>{numField(Number(p.depm), "depm")}</td>
+                        <td style={{ padding: "3px 8px", color: tot >= 0 ? "#4ade80" : "#f87171", fontWeight: 600 }}>{tot >= 0 ? "+" : ""}{tot.toFixed(2)}</td>
+                        <td style={{ padding: "3px 8px" }}>{numField(Number(p.mpg_base), "mpgBase", 56, "0.5")}</td>
+                        <td style={{ padding: "3px 8px", textAlign: "center" }}>
+                          <input type="checkbox" checked={!!p.active} onChange={(e) => savePlayerFields(p, { active: e.target.checked })} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
       {tab === "manual" && (
         <div style={{ maxWidth: 520, marginBottom: 32 }}>
           <p style={{ color: "#64748b", fontSize: 13, marginBottom: 16 }}>
@@ -916,15 +1046,25 @@ export default function PlayersPage() {
           </div>
 
           <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>
-            Pikavalinta (kokonais-EPM varausnumeron mukaan, karkea arvio)
+            Tulokas: varausnumero → O/D-arvio (O = 0.6 − 0.75·ln(varaus), D = −0.5; 2025 luokan tulokaskauden data)
           </label>
-          <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
-            {[
-              { label: "Top-5 (−1.5)", o: -0.75, d: -0.75 },
-              { label: "Lotto 6-14 (−2.5)", o: -1.5, d: -1.0 },
-              { label: "Myöh. 1. kierros (−3.0)", o: -1.75, d: -1.25 },
-              { label: "2. kierros (−3.5)", o: -2.0, d: -1.5 },
-            ].map((preset) => (
+          <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
+            <input
+              type="number"
+              min={1}
+              max={60}
+              placeholder="Varaus 1–60"
+              onChange={(e) => {
+                const v = parseInt(e.target.value);
+                if (v >= 1) {
+                  const r = rookieByPick(v);
+                  setManO(r.o);
+                  setManD(r.d);
+                }
+              }}
+              style={{ width: 110, background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "4px 10px", fontSize: 12 }}
+            />
+            {ROOKIE_PRESETS.map((preset) => (
               <button
                 key={preset.label}
                 onClick={() => {
