@@ -189,6 +189,10 @@ export type SimResult = {
   pPlayIn: number; // sijat 7–10
   pPlayoffs: number; // pudotuspeleihin (play-in mukaan lukien)
   pSeed1: number;
+  pTop2: number; // konferenssin sijat 1–2 (runkosarja)
+  pTop4: number; // sijat 1–4
+  pBot2: number; // konferenssin 2 viimeistä
+  pLast: number; // konferenssin viimeinen
   pDiv: number; // divisioonan voitto (tasatilanteet arvotaan)
   // Päätepiste (summa 1): 0 ei play-iniin, 1 putosi play-inissä, 2 putosi 1. kierroksella, 3 2. kierroksella,
   // 4 konferenssifinaalissa, 5 hävisi finaalin, 6 mestari.
@@ -208,7 +212,7 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
   const n = inputs.length;
   const LP = inputs.reduce((a, t) => a + t.pace, 0) / n;
   const games = schedule.filter((g) => idx.has(g.home) && idx.has(g.away)).map((g) => ({ h: idx.get(g.home)!, a: idx.get(g.away)!, w: g.w, result: g.result, fat: (g.aFat ?? 0) - (g.hFat ?? 0) }));
-  const acc = inputs.map(() => ({ wins: new Float64Array(83), sumW: 0, top6: 0, pin: 0, po: 0, s1: 0, div: 0, stage: [0, 0, 0, 0, 0, 0, 0], winsList: [] as number[], simWins: new Float32Array(opt.sims) }));
+  const acc = inputs.map(() => ({ wins: new Float64Array(83), sumW: 0, top6: 0, pin: 0, po: 0, s1: 0, t2: 0, t4: 0, b2: 0, last: 0, div: 0, stage: [0, 0, 0, 0, 0, 0, 0], winsList: [] as number[], simWins: new Float32Array(opt.sims) }));
   const sdTeam = inputs.map((t) => t.sdOverride ?? autoSd(t, opt));
   const injMean = inputs.map((t) => t.stars.reduce((a, s) => a + s.loss * s.missMean, 0));
   const strength = new Float64Array(n);
@@ -271,6 +275,10 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
         if (rank < 6) acc[i].top6++;
         else if (rank < 10) acc[i].pin++;
         if (rank === 0) acc[i].s1++;
+        if (rank < 2) acc[i].t2++;
+        if (rank < 4) acc[i].t4++;
+        if (rank >= ids.length - 2) acc[i].b2++;
+        if (rank === ids.length - 1) acc[i].last++;
       });
       const seeds = ids.slice(0, 10);
       for (let r = 0; r < 6; r++) acc[seeds[r]].po++;
@@ -336,6 +344,10 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
       pPlayIn: a.pin / opt.sims,
       pPlayoffs: a.po / opt.sims,
       pSeed1: a.s1 / opt.sims,
+      pTop2: a.t2 / opt.sims,
+      pTop4: a.t4 / opt.sims,
+      pBot2: a.b2 / opt.sims,
+      pLast: a.last / opt.sims,
       pDiv: a.div / opt.sims,
       stage: a.stage.map((x) => x / opt.sims),
       pConf: (a.stage[5] + a.stage[6]) / opt.sims,

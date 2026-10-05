@@ -368,6 +368,8 @@ export default function SeasonPage() {
           </div>
         ))}
 
+      {results && <ConfRankTable results={results} />}
+
       {results && <H2HTable results={results} />}
 
       {results && <ChampTable results={results} />}
@@ -694,6 +696,66 @@ function H2HTable({ results }: { results: SimResult[] }) {
       ) : (
         <div style={{ fontSize: 12, color: "#64748b" }}>Valitse kaksi eri joukkuetta.</div>
       )}
+    </div>
+  );
+}
+
+// Konferenssisijoitukset runkosarjassa: 1., top 2, top 4, top 6, 2 viimeisen joukossa, viimeinen.
+function ConfRankTable({ results }: { results: SimResult[] }) {
+  const fair = (p: number) => (p <= 0.0005 ? "—" : (1 / p).toFixed(p < 0.02 ? 0 : 2));
+  const pc = (p: number) => (p < 0.0005 ? "–" : `${(p * 100).toFixed(p < 0.1 ? 1 : 0)} %`);
+  const cols: { h: string; f: (r: SimResult) => number }[] = [
+    { h: "1. sija", f: (r) => r.pSeed1 },
+    { h: "Top 2", f: (r) => r.pTop2 },
+    { h: "Top 4", f: (r) => r.pTop4 },
+    { h: "Top 6", f: (r) => r.pTop6 },
+    { h: "2 viimeisen joukossa", f: (r) => r.pBot2 },
+    { h: "Viimeinen", f: (r) => r.pLast },
+  ];
+  const cell = { padding: "2px 8px", fontVariantNumeric: "tabular-nums" as const, textAlign: "right" as const };
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <h2 style={{ fontSize: 15, margin: "0 0 4px" }}>Konferenssisijoitukset (runkosarja)</h2>
+      <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8 }}>
+        Todennäköisyys ja reilu kerroin (suluissa). Sijoitus voittomäärän mukaan konferenssissa, tasatilanteet arvottu (ei NBA:n tiebreak-sääntöjä).
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(620px, 1fr))", gap: 16 }}>
+        {(["East", "West"] as const).map((conf) => (
+          <div key={conf} style={{ overflowX: "auto" }}>
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>{conf === "East" ? "Itä" : "Länsi"}</div>
+            <table style={{ borderCollapse: "collapse", fontSize: 11 }}>
+              <thead>
+                <tr style={{ color: "#64748b" }}>
+                  <th style={{ ...cell, textAlign: "left" }}>Joukkue</th>
+                  {cols.map((c) => (
+                    <th key={c.h} style={cell}>
+                      {c.h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {results
+                  .filter((r) => r.conf === conf)
+                  .sort((a, b) => b.meanWins - a.meanWins)
+                  .map((r) => (
+                    <tr key={r.team} style={{ borderTop: "1px solid #1f2937", color: "#cbd5e1" }}>
+                      <td style={{ ...cell, textAlign: "left", whiteSpace: "nowrap" }}>{r.team}</td>
+                      {cols.map((c) => {
+                        const p = c.f(r);
+                        return (
+                          <td key={c.h} style={cell}>
+                            <strong>{pc(p)}</strong> <span style={{ color: "#64748b" }}>{p > 0.0005 ? `(${fair(p)})` : ""}</span>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
