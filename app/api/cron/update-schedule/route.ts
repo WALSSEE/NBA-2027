@@ -47,7 +47,7 @@ export async function GET(request: Request) {
   // ESPN-rivit eivät tunne NBA:n game_id:tä: poistetaan saman kauden tulevat ottelut, joilla
   // ei ole tulosta, ennen kuin uudet lisätään, jotta ei synny tuplia.
   const seasonStart = `${endYear - 1}-09-20`; // harjoituskausi mukaan
-  const { error: delErr } = await supabase.from("schedule").delete().gte("date", seasonStart).is("home_score", null);
+  const { error: delErr, count: deletedOld } = await supabase.from("schedule").delete({ count: "exact" }).gte("date", seasonStart).is("home_score", null);
   if (delErr) return NextResponse.json({ ok: false, error: `Vanhojen rivien poisto: ${delErr.message}` }, { status: 500 });
   const { data: played } = await fetchAll((a, b) => supabase.from("schedule").select("date, home, away").gte("date", seasonStart).order("id").range(a, b));
   const playedKey = new Set((played ?? []).map((g: any) => `${g.date}|${g.home}|${g.away}`));
@@ -55,6 +55,20 @@ export async function GET(request: Request) {
   for (let i = 0; i < fresh.length; i += 500) {
     const { error } = await supabase.from("schedule").upsert(fresh.slice(i, i + 500), { onConflict: "game_id" });
     if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  }
+  // Vanhentuneet rivit: pelaamaton ottelu, jota ei ole tässä haussa (esim. toisen lähteen id) -> pois.
+  let removedStale = 0;
+  {
+    const keep = new Set(fresh.map((r) => r.game_id));
+    const { data: unplayed } = await fetchAll((a, b) =>
+      supabase.from("schedule").select("id, game_id").gte("date", seasonStart).is("home_score", null).order("id").range(a, b)
+    );
+    const stale = (unplayed ?? []).filter((g: any) => !keep.has(g.game_id)).map((g: any) => g.id);
+    for (let i = 0; i < stale.length; i += 200) {
+      const { error } = await supabase.from("schedule").delete().in("id", stale.slice(i, i + 200));
+      if (error) return NextResponse.json({ ok: false, error: `Vanhentuneiden poisto: ${error.message}` }, { status: 500 });
+    }
+    removedStale = stale.length;
   }
   // Tuplien siivous: sama ottelu (päivä + koti + vieras) voi tulla kahdesti, jos kaksi hakua ajetaan
   // yhtä aikaa (cron + nappi) tai lähde vaihtuu (NBA CDN / ESPN). Pidetään tuloksellinen, sitten NBA:n id.
@@ -82,5 +96,5 @@ export async function GET(request: Request) {
     removedDup = del.length;
   }
   const reg = rows.filter((r) => r.season_type === "reg").length;
-  return NextResponse.json({ ok: true, source, total: rows.length, regular: reg, preseason: rows.length - reg, inserted: fresh.length, removedDuplicates: removedDup, notes: errors });
+  return NextResponse.json({ ok: true, source, total: rows.length, regular: reg, preseason: rows.length - reg, inserted: fresh.length, removedDuplicates: removedDup + removedStale, deletedBefore: deletedOld ?? null, notes: errors });
 }

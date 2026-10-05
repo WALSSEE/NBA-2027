@@ -1,12 +1,10 @@
--- Poistaa otteluohjelman tuplat (sama päivä + koti + vieras). Pidetään ottelu, jolla on tulos,
--- ja muuten NBA:n oma id (ei 'espn-'). Pelattuja otteluita ei poisteta.
-delete from schedule s using schedule t
-where s.date = t.date and s.home = t.home and s.away = t.away and s.id <> t.id
-  and s.home_score is null
-  and (
-    t.home_score is not null
-    or (s.game_id like 'espn-%' and t.game_id not like 'espn-%')
-    or ((s.game_id like 'espn-%') = (t.game_id like 'espn-%') and s.id::text > t.id::text)
-  );
-select season_type, count(*) as otteluita, count(distinct (date, home, away)) as eri_otteluita
-from schedule where date >= '2026-09-20' group by season_type;
+-- 1) Mitä taulussa on: lähde (NBA-id vai espn-), kausityyppi, määrät ja päivät.
+select case when game_id like 'espn-%' then 'ESPN' else 'NBA' end as lahde, season_type,
+       count(*) as rivit, count(*) filter (where home_score is null) as ilman_tulosta, min(date), max(date)
+from schedule where date >= '2026-09-20' group by 1, 2 order by 1, 2;
+
+-- 2) Siivous: poistetaan KAIKKI tämän kauden pelaamattomat ottelut. Paina sen jälkeen Games-sivulla
+--    "Hae kauden otteluohjelma", joka lisää ohjelman yhdestä lähteestä puhtaalta pöydältä.
+delete from schedule where date >= '2026-09-20' and home_score is null;
+
+select count(*) as jaljella_tamalta_kaudelta from schedule where date >= '2026-09-20';
