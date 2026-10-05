@@ -14,5 +14,26 @@ export async function GET() {
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
-  return NextResponse.json({ games: data ?? [] });
+  // Turvaverkko tuplia vastaan: sama rivi (id) tai sama ottelu (päivä + koti + vieras) vain kerran.
+  // Pidetään tuloksellinen, sitten NBA:n oma id (ei 'espn-').
+  const rank = (g: any) => (g.home_score != null ? 0 : 2) + (String(g.game_id ?? "").startsWith("espn-") ? 1 : 0);
+  const best = new Map<string, any>();
+  const seenId = new Set<string>();
+  let dupRows = 0;
+  for (const g of data ?? []) {
+    if (seenId.has(g.id)) {
+      dupRows++;
+      continue;
+    }
+    seenId.add(g.id);
+    const k = `${g.date}|${g.home}|${g.away}`;
+    const cur = best.get(k);
+    if (!cur) best.set(k, g);
+    else {
+      dupRows++;
+      if (rank(g) < rank(cur)) best.set(k, g);
+    }
+  }
+  const games = Array.from(best.values()).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  return NextResponse.json({ games, rawRows: (data ?? []).length, duplicatesHidden: dupRows });
 }

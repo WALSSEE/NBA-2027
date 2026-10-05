@@ -59,6 +59,7 @@ export default function GamesPage() {
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         setGames(data.games ?? []);
+        if (data.duplicatesHidden) setMsg(`Huom: tietokannassa ${data.rawRows} riviä, joista ${data.duplicatesHidden} tuplaa piilotettu.`);
       } catch (e: any) {
         setError(e.message ?? "Virhe datan haussa");
       } finally {
