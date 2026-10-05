@@ -514,7 +514,7 @@ export default function MatchupPage() {
         const [teamsRes, txRes, gamesRes, playersRes] = await Promise.all([
           fetch("/api/team-stats"),
           fetch("/api/transactions"),
-          fetch("/api/schedule"),
+          fetch("/api/schedule", { cache: "no-store" }),
           fetch("/api/players/import"),
         ]);
         const [teamsJson, txJson, gamesJson, playersJson] = await Promise.all([

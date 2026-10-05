@@ -41,7 +41,7 @@ export default function SeasonPage() {
           fetch("/api/team-stats").then((x) => x.json()),
           fetch("/api/players/import").then((x) => x.json()),
           fetch("/api/prev-season").then((x) => x.json()),
-          fetch("/api/schedule").then((x) => x.json()),
+          fetch("/api/schedule", { cache: "no-store" }).then((x) => x.json()),
           loadPreSettingsRemote(),
         ]);
         setTeams(t.teams ?? []);

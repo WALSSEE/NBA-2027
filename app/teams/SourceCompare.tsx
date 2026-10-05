@@ -49,7 +49,7 @@ export default function SourceCompare({
       .then((r) => r.json())
       .then((j) => j?.settings?.preseason_snapshot && setSnap(j.settings.preseason_snapshot))
       .catch(() => {});
-    fetch("/api/schedule")
+    fetch("/api/schedule", { cache: "no-store" })
       .then((r) => r.json())
       .then((j) => setGames(j.games ?? []))
       .catch(() => {});

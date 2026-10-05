@@ -75,14 +75,15 @@ export async function GET(request: Request) {
   let removedDup = 0;
   {
     const { data: all } = await fetchAll((a, b) =>
-      supabase.from("schedule").select("id, game_id, date, home, away, home_score").gte("date", seasonStart).order("id").range(a, b)
+      supabase.from("schedule").select("id, game_id, date, home, away, home_score, season_type").gte("date", seasonStart).order("id").range(a, b)
     );
     const groups = new Map<string, any[]>();
     for (const g of all ?? []) {
       const k = `${g.date}|${g.home}|${g.away}`;
       (groups.get(k) ?? groups.set(k, []).get(k)!).push(g);
     }
-    const rank = (g: any) => (g.home_score != null ? 0 : 2) + (String(g.game_id).startsWith("espn-") ? 1 : 0);
+    const rank = (g: any) =>
+    (g.home_score != null ? 0 : 4) + (g.season_type === "pre" ? 0 : 2) + (String(g.game_id ?? "").startsWith("espn-") ? 1 : 0);
     const del: string[] = [];
     for (const list of groups.values()) {
       if (list.length < 2) continue;

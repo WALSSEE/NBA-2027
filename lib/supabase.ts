@@ -8,5 +8,9 @@ export function getSupabaseAdmin() {
   if (!url || !key) {
     throw new Error("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY puuttuu ympäristömuuttujista");
   }
-  return createClient(url, key, { auth: { persistSession: false } });
+  // cache: "no-store": Next.js ei saa välimuistittaa tietokantahakuja (muuten sivuille voi tulla vanhaa dataa).
+  return createClient(url, key, {
+    auth: { persistSession: false },
+    global: { fetch: (input: any, init?: any) => fetch(input, { ...init, cache: "no-store" }) },
+  });
 }

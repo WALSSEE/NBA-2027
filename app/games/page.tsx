@@ -41,7 +41,7 @@ export default function GamesPage() {
       if (!res.ok || j.ok === false) setMsg(`Virhe: ${j.error ?? res.status}`);
       else if (kind === "schedule") setMsg(`Otteluohjelma haettu (${j.source}): runkosarja ${j.regular ?? j.total}, harjoituskausi ${j.preseason ?? 0} ottelua, ${j.inserted} tallennettu, ${j.deletedBefore ?? "?"} vanhaa poistettu ennen hakua${j.removedDuplicates ? `, ${j.removedDuplicates} tuplaa/vanhentunutta poistettu` : ""}.${j.notes?.length ? " " + j.notes.join(" · ") : ""}`);
       else setMsg(`Tulokset päivitetty: ${j.updated} ottelua.${j.remainingDays ? ` Päiviä vielä jäljellä ${j.remainingDays} — paina uudelleen.` : ""}`);
-      const data = await fetch("/api/schedule").then((r) => r.json());
+      const data = await fetch("/api/schedule", { cache: "no-store" }).then((r) => r.json());
       setGames(data.games ?? []);
     } catch (e: any) {
       setMsg(`Virhe: ${e?.message ?? e}`);
@@ -55,7 +55,7 @@ export default function GamesPage() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch("/api/schedule");
+        const res = await fetch("/api/schedule", { cache: "no-store" });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         setGames(data.games ?? []);
