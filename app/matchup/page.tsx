@@ -93,6 +93,19 @@ const DEFAULT_3IN4 = 1.5;
 type Fatigue = "none" | "3in4" | "b2b";
 const FATIGUE_LABEL: Record<Fatigue, string> = { none: "Levännyt", "3in4": "3 peliä / 4 pv", b2b: "B2B" };
 
+// Pelipaikka: normaali kotipeli, harjoituspelin kotipeli (pienempi kotietu)
+// tai neutraali kenttä (kotietu 0). "auto" = harjoituspeli jos ottelu on
+// otteluohjelmassa harjoituspelinä, muuten normaali.
+type Venue = "auto" | "normal" | "pre" | "neutral";
+const VENUE_LABEL: Record<Exclude<Venue, "auto">, string> = {
+  normal: "Kotipeli",
+  pre: "Harjoituspeli (koti)",
+  neutral: "Neutraali kenttä",
+};
+const DEFAULT_PRE_HCA_FACTOR = 0.5;
+const PRE_HCA_KEY = "matchup_pre_hca_factor_v1";
+const VENUE_KEY = "matchup_venue_override_v1";
+
 // Ottelun tempo joukkueiden pacejen perusteella.
 type PaceMethod = "excel" | "additive" | "average";
 const PACE_LABEL: Record<PaceMethod, string> = {
@@ -399,6 +412,42 @@ export default function MatchupPage() {
     }
   }
   const [fatigueOverride, setFatigueOverride] = useState<Record<string, Fatigue>>({});
+  // Pelipaikka per ottelu (avain päivä|koti|vieras), tallennetaan selaimeen.
+  const [venueOverride, setVenueOverrideState] = useState<Record<string, Venue>>({});
+  const [preHcaFactor, setPreHcaFactorState] = useState(DEFAULT_PRE_HCA_FACTOR);
+  useEffect(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(VENUE_KEY) ?? "null");
+      if (v && typeof v === "object") setVenueOverrideState(v);
+      const f = Number(localStorage.getItem(PRE_HCA_KEY));
+      if (localStorage.getItem(PRE_HCA_KEY) != null && Number.isFinite(f) && f >= 0 && f <= 1.5) setPreHcaFactorState(f);
+    } catch {
+      // ei haittaa
+    }
+  }, []);
+  function setVenueFor(key: string, v: Venue) {
+    setVenueOverrideState((prev) => {
+      const next = { ...prev };
+      if (v === "auto") delete next[key];
+      else next[key] = v;
+      try {
+        localStorage.setItem(VENUE_KEY, JSON.stringify(next));
+      } catch {
+        // ei haittaa
+      }
+      return next;
+    });
+  }
+  function setPreHcaFactor(v: number) {
+    if (!Number.isFinite(v)) return;
+    const c = Math.max(0, Math.min(1.5, v));
+    setPreHcaFactorState(c);
+    try {
+      localStorage.setItem(PRE_HCA_KEY, String(c));
+    } catch {
+      // ei haittaa
+    }
+  }
   useEffect(() => {
     const d = new Date();
     setGameDate(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
@@ -823,11 +872,28 @@ export default function MatchupPage() {
     return { homePts, awayPts, margin: homePts - awayPts, total: homePts + awayPts };
   }
 
+  // Pelipaikka: käsin valittu tai otteluohjelmasta (harjoituspeli → "pre").
+  const venueKey = (h: string, a: string) => `${gameDate}|${h}|${a}`;
+  function venueAuto(h: string, a: string): Exclude<Venue, "auto"> {
+    if (!gameDate) return "normal";
+    const g = games.find((x) => x.date === gameDate && ((x.home === h && x.away === a) || (x.home === a && x.away === h)));
+    return g && (g as any).season_type === "pre" ? "pre" : "normal";
+  }
+  function venueOf(h: string, a: string): Exclude<Venue, "auto"> {
+    const o = venueOverride[venueKey(h, a)];
+    return o && o !== "auto" ? o : venueAuto(h, a);
+  }
+  function hcaFor(t: TeamStats, a: string): number {
+    const v = venueOf(t.team, a);
+    const base = t.home_adv ?? 0;
+    return v === "neutral" ? 0 : v === "pre" ? base * preHcaFactor : base;
+  }
+
   const projection = (() => {
     if (!home || !away || !homeFinal || !awayFinal) return null;
     const b2bCount = (fatigueOf(home.team) === "b2b" ? 1 : 0) + (fatigueOf(away.team) === "b2b" ? 1 : 0);
     const pace = gamePace(homeFinal.paceActual, awayFinal.paceActual) + b2bPaceAdj * b2bCount;
-    const hca = home.home_adv ?? 0;
+    const hca = hcaFor(home, away.team);
     const hB2B = fatiguePts(fatigueOf(home.team));
     const aB2B = fatiguePts(fatigueOf(away.team));
     const adj = project(homeFinal.finalOrtg, homeFinal.finalDrtg, awayFinal.finalOrtg, awayFinal.finalDrtg, pace, hca, hB2B, aB2B);
@@ -844,7 +910,7 @@ export default function MatchupPage() {
     if (!h || !a || !hf || !af) return null;
     const b2bCount = (fatigueOf(h.team) === "b2b" ? 1 : 0) + (fatigueOf(a.team) === "b2b" ? 1 : 0);
     const pace = gamePace(hf.paceActual, af.paceActual) + b2bPaceAdj * b2bCount;
-    return project(hf.finalOrtg, hf.finalDrtg, af.finalOrtg, af.finalDrtg, pace, h.home_adv ?? 0, fatiguePts(fatigueOf(h.team)), fatiguePts(fatigueOf(a.team)));
+    return project(hf.finalOrtg, hf.finalDrtg, af.finalOrtg, af.finalDrtg, pace, hcaFor(h, a.team), fatiguePts(fatigueOf(h.team)), fatiguePts(fatigueOf(a.team)));
   }
 
   const parsedSpread = spreadLine.trim() === "" ? null : Number(spreadLine.replace(",", "."));
@@ -1230,6 +1296,43 @@ export default function MatchupPage() {
           title="Väsymys tunnistetaan otteluohjelmasta: B2B = pelasi edellisenä päivänä, 3/4 = kaksi peliä edeltävien 3 päivän aikana"
           style={{ ...smallInput, colorScheme: "dark" }}
         />
+        {home && away && (
+          <>
+            <label style={{ fontSize: 12, color: "#94a3b8", marginLeft: 8 }}>Pelipaikka</label>
+            <select
+              value={venueOverride[venueKey(home.team, away.team)] ?? "auto"}
+              onChange={(e) => setVenueFor(venueKey(home.team, away.team), e.target.value as Venue)}
+              title="Auto: harjoituspeli jos ottelu on otteluohjelmassa harjoituspelinä, muuten normaali kotipeli. Neutraali kenttä = kotietu 0."
+              style={{ ...smallInput, color: venueOf(home.team, away.team) === "normal" ? undefined : "#fbbf24" }}
+            >
+              <option value="auto">Auto ({VENUE_LABEL[venueAuto(home.team, away.team)]})</option>
+              {(["normal", "pre", "neutral"] as const).map((v) => (
+                <option key={v} value={v}>
+                  {VENUE_LABEL[v]}
+                </option>
+              ))}
+            </select>
+            <span style={{ fontSize: 12, color: "#94a3b8" }}>
+              HCA {hcaFor(home, away.team).toFixed(1)}
+              {venueOf(home.team, away.team) !== "normal" && <> (norm. {(home.home_adv ?? 0).toFixed(1)})</>}
+            </span>
+            {venueOf(home.team, away.team) === "pre" && (
+              <label style={{ fontSize: 12, color: "#94a3b8", display: "flex", alignItems: "center", gap: 4 }}>
+                × kerroin
+                <input
+                  type="number"
+                  step={0.1}
+                  min={0}
+                  max={1.5}
+                  value={preHcaFactor}
+                  onChange={(e) => setPreHcaFactor(Number(e.target.value))}
+                  title="Harjoituspelin kotiedun kerroin normaaliin kotietuun verrattuna (oletus 0,5). Koskee kaikkia harjoituspelejä."
+                  style={{ ...smallInput, width: 60 }}
+                />
+              </label>
+            )}
+          </>
+        )}
       </div>
 
       {/* Ennuste + todennäköisyydet */}
@@ -1517,7 +1620,25 @@ export default function MatchupPage() {
                           }}
                         >
                           <td style={{ ...td, color: "#e2e8f0" }}>
-                            {e.away} @ <strong>{e.home}</strong>
+                            {e.away} @ <strong>{e.home}</strong>{" "}
+                            <select
+                              value={venueOverride[venueKey(e.home, e.away)] ?? "auto"}
+                              onClick={(ev) => ev.stopPropagation()}
+                              onChange={(ev) => setVenueFor(venueKey(e.home, e.away), ev.target.value as Venue)}
+                              title="Pelipaikka: vaikuttaa kotietuun"
+                              style={{
+                                ...smallInput,
+                                padding: "0 4px",
+                                fontSize: 11,
+                                marginLeft: 4,
+                                color: venueOf(e.home, e.away) === "normal" ? "#64748b" : "#fbbf24",
+                              }}
+                            >
+                              <option value="auto">{venueAuto(e.home, e.away) === "pre" ? "auto: harj." : "auto"}</option>
+                              <option value="normal">koti</option>
+                              <option value="pre">harj. koti</option>
+                              <option value="neutral">neutraali</option>
+                            </select>
                           </td>
                           <td style={td}>
                             {short(e.home)} {sg(modelSpread)} / {sp ? sg(sp.point) : "—"}
