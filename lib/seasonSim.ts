@@ -196,6 +196,7 @@ export type SimResult = {
   pConf: number; // konferenssin mestaruus (finaaliin)
   pChamp: number;
   winDist: number[]; // voittojen jakauma 0..82
+  simWins: Float32Array; // voitot jokaisessa simulaatiossa (samassa järjestyksessä kaikilla joukkueilla -> H2H)
 };
 
 export function autoSd(t: TeamInput, opt: { baseSd: number; turnoverSd: number }): number {
@@ -207,7 +208,7 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
   const n = inputs.length;
   const LP = inputs.reduce((a, t) => a + t.pace, 0) / n;
   const games = schedule.filter((g) => idx.has(g.home) && idx.has(g.away)).map((g) => ({ h: idx.get(g.home)!, a: idx.get(g.away)!, w: g.w, result: g.result, fat: (g.aFat ?? 0) - (g.hFat ?? 0) }));
-  const acc = inputs.map(() => ({ wins: new Float64Array(83), sumW: 0, top6: 0, pin: 0, po: 0, s1: 0, div: 0, stage: [0, 0, 0, 0, 0, 0, 0], winsList: [] as number[] }));
+  const acc = inputs.map(() => ({ wins: new Float64Array(83), sumW: 0, top6: 0, pin: 0, po: 0, s1: 0, div: 0, stage: [0, 0, 0, 0, 0, 0, 0], winsList: [] as number[], simWins: new Float32Array(opt.sims) }));
   const sdTeam = inputs.map((t) => t.sdOverride ?? autoSd(t, opt));
   const injMean = inputs.map((t) => t.stars.reduce((a, s) => a + s.loss * s.missMean, 0));
   const strength = new Float64Array(n);
@@ -314,6 +315,7 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
       acc[i].sumW += wins[i];
       acc[i].wins[Math.max(0, Math.min(82, Math.round(wins[i])))]++;
       acc[i].winsList.push(wins[i]);
+      acc[i].simWins[s] = wins[i];
     }
   }
   return inputs.map((t, i) => {
@@ -339,6 +341,7 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
       pConf: (a.stage[5] + a.stage[6]) / opt.sims,
       pChamp: a.stage[6] / opt.sims,
       winDist: Array.from(a.wins, (x) => x / opt.sims),
+      simWins: a.simWins,
     };
   });
 }

@@ -368,6 +368,8 @@ export default function SeasonPage() {
           </div>
         ))}
 
+      {results && <H2HTable results={results} />}
+
       {results && <ChampTable results={results} />}
 
       {results && <DivisionTable results={results} />}
@@ -594,6 +596,104 @@ function ChampTable({ results }: { results: SimResult[] }) {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// H2H kausivoitot: kaksi joukkuetta samoista simulaatioista (yhteiset ottelut ja vaihtelu mukana).
+// Voitot pyöristetään kokonaisluvuiksi; sama määrä = push (panos palautetaan).
+function H2HTable({ results }: { results: SimResult[] }) {
+  const teams = [...results].map((r) => r.team).sort();
+  const [a, setA] = useState(teams[0] ?? "");
+  const [b, setB] = useState(teams[1] ?? "");
+  const [oa, setOa] = useState("");
+  const [ob, setOb] = useState("");
+  const [hc, setHc] = useState("0"); // tasoitus joukkueelle A (esim. -2.5)
+  const ra = results.find((r) => r.team === a);
+  const rb = results.find((r) => r.team === b);
+  const inp = { background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, padding: "3px 6px", fontSize: 12 };
+  let pa = 0, pb = 0, pp = 0, diffSum = 0;
+  const h = parseFloat(hc.replace(",", ".")) || 0;
+  if (ra && rb && a !== b) {
+    const n = ra.simWins.length;
+    for (let i = 0; i < n; i++) {
+      const d = Math.round(ra.simWins[i]) + h - Math.round(rb.simWins[i]);
+      diffSum += Math.round(ra.simWins[i]) - Math.round(rb.simWins[i]);
+      if (Math.abs(d) < 1e-9) pp++;
+      else if (d > 0) pa++;
+      else pb++;
+    }
+    pa /= n; pb /= n; pp /= n; diffSum /= n;
+  }
+  const fair2 = (p: number) => (p <= 0.0005 ? "—" : ((1 - pp) / p).toFixed(2)); // push palautetaan
+  const fair3 = (p: number) => (p <= 0.0005 ? "—" : (1 / p).toFixed(2));
+  const ev = (p: number, raw: string) => {
+    const o = parseFloat(raw.replace(",", "."));
+    if (!Number.isFinite(o)) return null;
+    return p * o + pp - 1; // push palauttaa panoksen
+  };
+  const evSpan = (v: number | null) =>
+    v == null ? null : (
+      <span style={{ color: v > 0.03 ? "#4ade80" : v > 0 ? "#a3e635" : "#64748b", fontWeight: v > 0.03 ? 700 : 400 }}>EV {(v * 100).toFixed(1)} %</span>
+    );
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <h2 style={{ fontSize: 15, margin: "0 0 4px" }}>H2H kausivoitot</h2>
+      <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8, maxWidth: 900, lineHeight: 1.6 }}>
+        Kumpi joukkue voittaa runkosarjassa enemmän otteluita. Lasketaan samoista simulaatioista, joten keskinäiset ottelut ja
+        yhteinen vaihtelu ovat mukana. Tasamäärä = push (panos palautetaan). Tasoitus lisätään joukkueen A voittoihin (esim. −1.5).
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10, fontSize: 12 }}>
+        <select value={a} onChange={(e) => setA(e.target.value)} style={inp}>
+          {teams.map((t) => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <span style={{ color: "#64748b" }}>vs</span>
+        <select value={b} onChange={(e) => setB(e.target.value)} style={inp}>
+          {teams.map((t) => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <span style={{ color: "#94a3b8", marginLeft: 8 }}>Tasoitus A</span>
+        <input value={hc} onChange={(e) => setHc(e.target.value)} style={{ ...inp, width: 56 }} />
+      </div>
+      {ra && rb && a !== b ? (
+        <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr style={{ color: "#64748b", textAlign: "left" }}>
+              {["", "Odot. voitot", "P (voittaa)", "Reilu (push palautus)", "Reilu 3-tie", "Kerroin", ""].map((x, i) => (
+                <th key={i} style={{ padding: "3px 10px" }}>{x}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {[
+              { name: a, r: ra, p: pa, odds: oa, set: setOa },
+              { name: b, r: rb, p: pb, odds: ob, set: setOb },
+            ].map((x) => (
+              <tr key={x.name} style={{ borderTop: "1px solid #1f2937", color: "#cbd5e1" }}>
+                <td style={{ padding: "3px 10px" }}>{x.name}</td>
+                <td style={{ padding: "3px 10px" }}>{x.r.meanWins.toFixed(1)}</td>
+                <td style={{ padding: "3px 10px", fontWeight: 700 }}>{(x.p * 100).toFixed(1)} %</td>
+                <td style={{ padding: "3px 10px" }}>{fair2(x.p)}</td>
+                <td style={{ padding: "3px 10px", color: "#94a3b8" }}>{fair3(x.p)}</td>
+                <td style={{ padding: "3px 10px" }}>
+                  <input value={x.odds} onChange={(e) => x.set(e.target.value)} placeholder="—" style={{ ...inp, width: 60 }} />
+                </td>
+                <td style={{ padding: "3px 10px" }}>{evSpan(ev(x.p, x.odds))}</td>
+              </tr>
+            ))}
+            <tr style={{ borderTop: "1px solid #1f2937", color: "#94a3b8" }}>
+              <td style={{ padding: "3px 10px" }}>Tasan (push)</td>
+              <td style={{ padding: "3px 10px" }}>ero {diffSum >= 0 ? "+" : ""}{diffSum.toFixed(1)}</td>
+              <td style={{ padding: "3px 10px" }}>{(pp * 100).toFixed(1)} %</td>
+              <td />
+              <td style={{ padding: "3px 10px" }}>{fair3(pp)}</td>
+              <td />
+              <td />
+            </tr>
+          </tbody>
+        </table>
+      ) : (
+        <div style={{ fontSize: 12, color: "#64748b" }}>Valitse kaksi eri joukkuetta.</div>
+      )}
     </div>
   );
 }
