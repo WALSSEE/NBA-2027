@@ -56,6 +56,31 @@ export async function GET(request: Request) {
     const { error } = await supabase.from("schedule").upsert(fresh.slice(i, i + 500), { onConflict: "game_id" });
     if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
+  // Tuplien siivous: sama ottelu (päivä + koti + vieras) voi tulla kahdesti, jos kaksi hakua ajetaan
+  // yhtä aikaa (cron + nappi) tai lähde vaihtuu (NBA CDN / ESPN). Pidetään tuloksellinen, sitten NBA:n id.
+  let removedDup = 0;
+  {
+    const { data: all } = await fetchAll((a, b) =>
+      supabase.from("schedule").select("id, game_id, date, home, away, home_score").gte("date", seasonStart).order("id").range(a, b)
+    );
+    const groups = new Map<string, any[]>();
+    for (const g of all ?? []) {
+      const k = `${g.date}|${g.home}|${g.away}`;
+      (groups.get(k) ?? groups.set(k, []).get(k)!).push(g);
+    }
+    const rank = (g: any) => (g.home_score != null ? 0 : 2) + (String(g.game_id).startsWith("espn-") ? 1 : 0);
+    const del: string[] = [];
+    for (const list of groups.values()) {
+      if (list.length < 2) continue;
+      list.sort((x, y) => rank(x) - rank(y) || String(x.id).localeCompare(String(y.id)));
+      for (const g of list.slice(1)) if (g.home_score == null) del.push(g.id);
+    }
+    for (let i = 0; i < del.length; i += 200) {
+      const { error } = await supabase.from("schedule").delete().in("id", del.slice(i, i + 200));
+      if (error) return NextResponse.json({ ok: false, error: `Tuplien poisto: ${error.message}` }, { status: 500 });
+    }
+    removedDup = del.length;
+  }
   const reg = rows.filter((r) => r.season_type === "reg").length;
-  return NextResponse.json({ ok: true, source, total: rows.length, regular: reg, preseason: rows.length - reg, inserted: fresh.length, notes: errors });
+  return NextResponse.json({ ok: true, source, total: rows.length, regular: reg, preseason: rows.length - reg, inserted: fresh.length, removedDuplicates: removedDup, notes: errors });
 }

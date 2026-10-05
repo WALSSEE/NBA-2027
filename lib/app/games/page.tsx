@@ -39,7 +39,7 @@ export default function GamesPage() {
       });
       const j = await res.json().catch(() => ({ error: `palvelin vastasi ${res.status}` }));
       if (!res.ok || j.ok === false) setMsg(`Virhe: ${j.error ?? res.status}`);
-      else if (kind === "schedule") setMsg(`Otteluohjelma haettu (${j.source}): runkosarja ${j.regular ?? j.total}, harjoituskausi ${j.preseason ?? 0} ottelua, ${j.inserted} tallennettu${j.removedDuplicates ? `, ${j.removedDuplicates} tuplaa poistettu` : ""}.${j.notes?.length ? " " + j.notes.join(" · ") : ""}`);
+      else if (kind === "schedule") setMsg(`Otteluohjelma haettu (${j.source}): runkosarja ${j.regular ?? j.total}, harjoituskausi ${j.preseason ?? 0} ottelua, ${j.inserted} tallennettu.${j.notes?.length ? " " + j.notes.join(" · ") : ""}`);
       else setMsg(`Tulokset päivitetty: ${j.updated} ottelua.${j.remainingDays ? ` Päiviä vielä jäljellä ${j.remainingDays} — paina uudelleen.` : ""}`);
       const data = await fetch("/api/schedule").then((r) => r.json());
       setGames(data.games ?? []);
