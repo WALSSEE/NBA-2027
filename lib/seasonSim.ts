@@ -190,6 +190,11 @@ export type SimResult = {
   pPlayoffs: number; // pudotuspeleihin (play-in mukaan lukien)
   pSeed1: number;
   pDiv: number; // divisioonan voitto (tasatilanteet arvotaan)
+  // Päätepiste (summa 1): 0 ei play-iniin, 1 putosi play-inissä, 2 putosi 1. kierroksella, 3 2. kierroksella,
+  // 4 konferenssifinaalissa, 5 hävisi finaalin, 6 mestari.
+  stage: number[];
+  pConf: number; // konferenssin mestaruus (finaaliin)
+  pChamp: number;
   winDist: number[]; // voittojen jakauma 0..82
 };
 
@@ -202,7 +207,7 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
   const n = inputs.length;
   const LP = inputs.reduce((a, t) => a + t.pace, 0) / n;
   const games = schedule.filter((g) => idx.has(g.home) && idx.has(g.away)).map((g) => ({ h: idx.get(g.home)!, a: idx.get(g.away)!, w: g.w, result: g.result, fat: (g.aFat ?? 0) - (g.hFat ?? 0) }));
-  const acc = inputs.map(() => ({ wins: new Float64Array(83), sumW: 0, top6: 0, pin: 0, po: 0, s1: 0, div: 0, winsList: [] as number[] }));
+  const acc = inputs.map(() => ({ wins: new Float64Array(83), sumW: 0, top6: 0, pin: 0, po: 0, s1: 0, div: 0, stage: [0, 0, 0, 0, 0, 0, 0], winsList: [] as number[] }));
   const sdTeam = inputs.map((t) => t.sdOverride ?? autoSd(t, opt));
   const injMean = inputs.map((t) => t.stars.reduce((a, s) => a + s.loss * s.missMean, 0));
   const strength = new Float64Array(n);
@@ -237,6 +242,26 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
         wins[g.a] += (k - hw) * f;
       }
     }
+    const game = (h: number, a: number) => {
+      const pace = inputs[h].pace + inputs[a].pace - LP;
+      const m = (strength[h] - strength[a]) * (pace / 100) + inputs[h].hca;
+      return Math.random() < normCdf(m / opt.gameSd) ? h : a;
+    };
+    // Paras seitsemästä, kotietu 2-2-1-1-1 (h = kotietu). Häviäjä kirjataan putoamisvaiheeseen loseStage.
+    const series = (h: number, a: number, loseStage: number) => {
+      let wh = 0, wa = 0, k = 0;
+      while (wh < 4 && wa < 4) {
+        const home = k === 0 || k === 1 || k === 4 || k === 6;
+        const w = home ? game(h, a) : game(a, h);
+        if (w === h) wh++;
+        else wa++;
+        k++;
+      }
+      const winner = wh === 4 ? h : a;
+      acc[winner === h ? a : h].stage[loseStage]++;
+      return winner;
+    };
+    const confChamp: Record<string, number> = { East: -1, West: -1 };
     // sijoitukset konferensseittain (tasatilanteet satunnaisesti)
     for (const conf of ["East", "West"] as const) {
       const ids = inputs.map((t, i) => i).filter((i) => TEAM_INFO[inputs[i].team]?.conf === conf);
@@ -248,19 +273,31 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
       });
       const seeds = ids.slice(0, 10);
       for (let r = 0; r < 6; r++) acc[seeds[r]].po++;
+      for (const i of ids.slice(10)) acc[i].stage[0]++;
       if (seeds.length >= 10) {
-        const game = (h: number, a: number) => {
-          const pace = inputs[h].pace + inputs[a].pace - LP;
-          const m = (strength[h] - strength[a]) * (pace / 100) + inputs[h].hca;
-          return Math.random() < normCdf(m / opt.gameSd) ? h : a;
-        };
         const w78 = game(seeds[6], seeds[7]);
         const l78 = w78 === seeds[6] ? seeds[7] : seeds[6];
         const w910 = game(seeds[8], seeds[9]);
+        const l910 = w910 === seeds[8] ? seeds[9] : seeds[8];
         const eighth = game(l78, w910);
+        const outPI = eighth === l78 ? w910 : l78;
         acc[w78].po++;
         acc[eighth].po++;
+        acc[l910].stage[1]++;
+        acc[outPI].stage[1]++;
+        // Pudotuspelit: 1–8, 4–5, 3–6, 2–7; parempi sija saa kotiedun.
+        const s8 = [seeds[0], seeds[1], seeds[2], seeds[3], seeds[4], seeds[5], w78, eighth];
+        const a1 = series(s8[0], s8[7], 2), a2 = series(s8[3], s8[4], 2), b1 = series(s8[2], s8[5], 2), b2 = series(s8[1], s8[6], 2);
+        const sf1 = series(a1, a2, 3), sf2 = series(b2, b1, 3);
+        confChamp[conf] = series(sf1, sf2, 4);
       }
+    }
+    // Finaali: kotietu paremmalla runkosarjan voittomäärällä.
+    if (confChamp.East >= 0 && confChamp.West >= 0) {
+      const e = confChamp.East, w = confChamp.West;
+      const hi = wins[e] >= wins[w] ? e : w, lo = hi === e ? w : e;
+      const champ = series(hi, lo, 5);
+      acc[champ].stage[6]++;
     }
     // divisioonien voittajat (tasatilanteessa satunnainen)
     for (const d of Object.values(DIVISIONS)) {
@@ -298,6 +335,9 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
       pPlayoffs: a.po / opt.sims,
       pSeed1: a.s1 / opt.sims,
       pDiv: a.div / opt.sims,
+      stage: a.stage.map((x) => x / opt.sims),
+      pConf: (a.stage[5] + a.stage[6]) / opt.sims,
+      pChamp: a.stage[6] / opt.sims,
       winDist: Array.from(a.wins, (x) => x / opt.sims),
     };
   });

@@ -240,7 +240,7 @@ export default function SeasonPage() {
               <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
                   <tr>
-                    {["#", "Joukkue", "Net", "Loukk.", "Varianssi (Net)", "Epävarm. ±", "Voitot", "10–90 %", "Linja (yli / alle)", "P(over)", "Reilu O / U", "EV over / under", "Top 6", "Play-in", "Pudotuspelit", "Divisioona", "1. sija"].map((h) => (
+                    {["#", "Joukkue", "Net", "Loukk.", "Varianssi (Net)", "Epävarm. ±", "Voitot", "10–90 %", "Linja (yli / alle)", "P(over)", "Reilu O / U", "EV over / under", "Top 6", "Play-in", "Pudotuspelit", "Divisioona", "1. sija", "Konf.", "Mestari"].map((h) => (
                       <th key={h} style={th}>
                         {h}
                       </th>
@@ -331,11 +331,15 @@ export default function SeasonPage() {
                               <strong>{pctS(r.pDiv)}</strong> <span style={{ color: "#64748b" }}>({fair(r.pDiv)})</span>
                             </td>
                             <td style={td}>{pctS(r.pSeed1)}</td>
+                            <td style={td}>{pctS(r.pConf)}</td>
+                            <td style={td}>
+                              <strong>{pctS(r.pChamp)}</strong>
+                            </td>
                           </tr>
                           {openTeam === r.team && ti && (
                             <tr>
                               <td />
-                              <td colSpan={15} style={{ padding: "4px 8px 10px", fontSize: 11, color: "#94a3b8", lineHeight: 1.9 }}>
+                              <td colSpan={18} style={{ padding: "4px 8px 10px", fontSize: 11, color: "#94a3b8", lineHeight: 1.9 }}>
                                 <div>
                                   Net: malli {used[r.team] ? signedN(used[r.team].model) : "—"}
                                   {used[r.team]?.market != null ? ` · markkina ${signedN(used[r.team].market!)}` : ""} · käytetty {signedN(r.net)}. Tason epävarmuus ±
@@ -363,6 +367,8 @@ export default function SeasonPage() {
             </div>
           </div>
         ))}
+
+      {results && <ChampTable results={results} />}
 
       {results && <DivisionTable results={results} />}
 
@@ -512,6 +518,81 @@ function DivisionTable({ results }: { results: SimResult[] }) {
             </table>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// Mestaruus ja putoamisvaihe: jokaisen joukkueen kauden päätepisteen jakauma (summa 100 %).
+function ChampTable({ results }: { results: SimResult[] }) {
+  const [odds, setOdds] = useState<Record<string, string>>({});
+  const [confOdds, setConfOdds] = useState<Record<string, string>>({});
+  const fair = (p: number) => (p <= 0.0005 ? "—" : (1 / p).toFixed(p < 0.02 ? 0 : 2));
+  const pc = (p: number) => (p < 0.0005 ? "–" : `${(p * 100).toFixed(p < 0.1 ? 1 : 0)} %`);
+  const cell = { padding: "2px 8px", fontVariantNumeric: "tabular-nums" as const, textAlign: "right" as const };
+  const inp = { background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, padding: "1px 6px", fontSize: 11, width: 54 };
+  const evCell = (p: number, raw: string | undefined) => {
+    const o = parseFloat((raw ?? "").replace(",", "."));
+    if (!Number.isFinite(o)) return <td style={cell} />;
+    const ev = p * o - 1;
+    return <td style={{ ...cell, color: ev > 0.03 ? "#4ade80" : ev > 0 ? "#a3e635" : "#64748b", fontWeight: ev > 0.03 ? 700 : 400 }}>{(ev * 100).toFixed(1)} %</td>;
+  };
+  const heads = ["Ei play-iniin", "Putosi play-in", "Putosi 1. kierr.", "Putosi 2. kierr.", "Putosi konf.fin.", "Hävisi finaalin", "Mestari"];
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <h2 style={{ fontSize: 15, margin: "0 0 4px" }}>Mestaruus ja putoamisvaihe</h2>
+      <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8, maxWidth: 900, lineHeight: 1.6 }}>
+        Jokaisessa simulaatiossa pelataan play-in (7–8 ja 9–10, häviäjä 7–8 vs. voittaja 9–10) ja pudotuspelit paras seitsemästä
+        (1–8, 4–5, 3–6, 2–7; parempi sija saa kotiedun 2-2-1-1-1, finaalissa parempi voittomäärä). Joukkueen taso ja tähtien poissaolot
+        ovat samat kuin runkosarjassa kyseisessä simulaatiossa. Rivi summautuu 100 %:iin. Syötä tarjottu kerroin, niin EV lasketaan.
+        Huom: pudotuspeleissä tähdet pelaavat enemmän minuutteja, mitä malli ei huomioi — kärkijoukkueiden mestaruustodennäköisyys voi olla
+        hieman aliarvioitu.
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", fontSize: 11 }}>
+          <thead>
+            <tr style={{ color: "#64748b" }}>
+              <th style={{ ...cell, textAlign: "left" }}>Joukkue</th>
+              {heads.map((h) => (
+                <th key={h} style={cell}>
+                  {h}
+                </th>
+              ))}
+              <th style={cell}>Reilu mestari</th>
+              <th style={cell}>Kerroin</th>
+              <th style={cell}>EV</th>
+              <th style={cell}>Konf. mestari</th>
+              <th style={cell}>Reilu</th>
+              <th style={cell}>Kerroin</th>
+              <th style={cell}>EV</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...results]
+              .sort((a, b) => b.pChamp - a.pChamp || b.pConf - a.pConf || b.meanWins - a.meanWins)
+              .map((r) => (
+                <tr key={r.team} style={{ borderTop: "1px solid #1f2937", color: "#cbd5e1" }}>
+                  <td style={{ ...cell, textAlign: "left", whiteSpace: "nowrap" }}>{r.team}</td>
+                  {r.stage.map((p, k) => (
+                    <td key={k} style={{ ...cell, color: k === 6 ? "#e2e8f0" : "#94a3b8", fontWeight: k === 6 ? 700 : 400 }}>
+                      {pc(p)}
+                    </td>
+                  ))}
+                  <td style={{ ...cell, color: "#94a3b8" }}>{fair(r.pChamp)}</td>
+                  <td style={cell}>
+                    <input value={odds[r.team] ?? ""} onChange={(e) => setOdds((x) => ({ ...x, [r.team]: e.target.value }))} placeholder="—" style={inp} />
+                  </td>
+                  {evCell(r.pChamp, odds[r.team])}
+                  <td style={cell}>{pc(r.pConf)}</td>
+                  <td style={{ ...cell, color: "#94a3b8" }}>{fair(r.pConf)}</td>
+                  <td style={cell}>
+                    <input value={confOdds[r.team] ?? ""} onChange={(e) => setConfOdds((x) => ({ ...x, [r.team]: e.target.value }))} placeholder="—" style={inp} />
+                  </td>
+                  {evCell(r.pConf, confOdds[r.team])}
+                </tr>
+              ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
