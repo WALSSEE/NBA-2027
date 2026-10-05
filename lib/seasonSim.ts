@@ -189,6 +189,7 @@ export type SimResult = {
   pPlayIn: number; // sijat 7–10
   pPlayoffs: number; // pudotuspeleihin (play-in mukaan lukien)
   pSeed1: number;
+  pDiv: number; // divisioonan voitto (tasatilanteet arvotaan)
   winDist: number[]; // voittojen jakauma 0..82
 };
 
@@ -201,7 +202,7 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
   const n = inputs.length;
   const LP = inputs.reduce((a, t) => a + t.pace, 0) / n;
   const games = schedule.filter((g) => idx.has(g.home) && idx.has(g.away)).map((g) => ({ h: idx.get(g.home)!, a: idx.get(g.away)!, w: g.w, result: g.result, fat: (g.aFat ?? 0) - (g.hFat ?? 0) }));
-  const acc = inputs.map(() => ({ wins: new Float64Array(83), sumW: 0, top6: 0, pin: 0, po: 0, s1: 0, winsList: [] as number[] }));
+  const acc = inputs.map(() => ({ wins: new Float64Array(83), sumW: 0, top6: 0, pin: 0, po: 0, s1: 0, div: 0, winsList: [] as number[] }));
   const sdTeam = inputs.map((t) => t.sdOverride ?? autoSd(t, opt));
   const injMean = inputs.map((t) => t.stars.reduce((a, s) => a + s.loss * s.missMean, 0));
   const strength = new Float64Array(n);
@@ -261,6 +262,17 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
         acc[eighth].po++;
       }
     }
+    // divisioonien voittajat (tasatilanteessa satunnainen)
+    for (const d of Object.values(DIVISIONS)) {
+      let best = -1, bw = -1, ties = 0;
+      for (const t of d.teams) {
+        const i = idx.get(t);
+        if (i == null) continue;
+        if (wins[i] > bw + 1e-9) { best = i; bw = wins[i]; ties = 1; }
+        else if (Math.abs(wins[i] - bw) <= 1e-9) { ties++; if (Math.random() < 1 / ties) best = i; }
+      }
+      if (best >= 0) acc[best].div++;
+    }
     for (let i = 0; i < n; i++) {
       acc[i].sumW += wins[i];
       acc[i].wins[Math.max(0, Math.min(82, Math.round(wins[i])))]++;
@@ -285,6 +297,7 @@ export function simulateSeason(inputs: TeamInput[], schedule: SimGame[], opt: Si
       pPlayIn: a.pin / opt.sims,
       pPlayoffs: a.po / opt.sims,
       pSeed1: a.s1 / opt.sims,
+      pDiv: a.div / opt.sims,
       winDist: Array.from(a.wins, (x) => x / opt.sims),
     };
   });

@@ -5,7 +5,7 @@ import { computePreseason, loadPreSettingsRemote, DEFAULT_PRE_SETTINGS, type Pre
 import type { PrevRow } from "@/lib/prevSeason";
 import { withRatings } from "@/lib/ratings";
 import { WINS_PER_NET } from "@/lib/preseason";
-import { buildSchedule, teamInputs, simulateSeason, marketNets, pOver, autoSd, type SimResult, type TeamInput } from "@/lib/seasonSim";
+import { buildSchedule, teamInputs, simulateSeason, marketNets, pOver, autoSd, DIVISIONS, type SimResult, type TeamInput } from "@/lib/seasonSim";
 
 const SEASON_START = "2026-10-01";
 
@@ -240,7 +240,7 @@ export default function SeasonPage() {
               <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
                   <tr>
-                    {["#", "Joukkue", "Net", "Loukk.", "Varianssi (Net)", "Epävarm. ±", "Voitot", "10–90 %", "Linja (yli / alle)", "P(over)", "Reilu O / U", "EV over / under", "Top 6", "Play-in", "Pudotuspelit", "1. sija"].map((h) => (
+                    {["#", "Joukkue", "Net", "Loukk.", "Varianssi (Net)", "Epävarm. ±", "Voitot", "10–90 %", "Linja (yli / alle)", "P(over)", "Reilu O / U", "EV over / under", "Top 6", "Play-in", "Pudotuspelit", "Divisioona", "1. sija"].map((h) => (
                       <th key={h} style={th}>
                         {h}
                       </th>
@@ -327,6 +327,9 @@ export default function SeasonPage() {
                             <td style={{ ...td, fontWeight: 700 }}>
                               {pctS(r.pPlayoffs)} <span style={{ color: "#64748b", fontWeight: 400 }}>({fair(r.pPlayoffs)} / {fair(1 - r.pPlayoffs)})</span>
                             </td>
+                            <td style={td}>
+                              <strong>{pctS(r.pDiv)}</strong> <span style={{ color: "#64748b" }}>({fair(r.pDiv)})</span>
+                            </td>
                             <td style={td}>{pctS(r.pSeed1)}</td>
                           </tr>
                           {openTeam === r.team && ti && (
@@ -360,6 +363,8 @@ export default function SeasonPage() {
             </div>
           </div>
         ))}
+
+      {results && <DivisionTable results={results} />}
 
       {results && (
         <div style={{ fontSize: 11, color: "#64748b", maxWidth: 900, lineHeight: 1.7 }}>
@@ -444,6 +449,69 @@ function AltLines({ r, line }: { r: SimResult; line: number | null }) {
             )}
           </span>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Divisioonien voittajat: simulaation todennäköisyys, reilu kerroin ja oma tarjottu kerroin -> EV.
+function DivisionTable({ results }: { results: SimResult[] }) {
+  const [odds, setOdds] = useState<Record<string, string>>({});
+  const by = new Map(results.map((r) => [r.team, r]));
+  const fair = (p: number) => (p <= 0.0005 ? "—" : (1 / p).toFixed(2));
+  const cell = { padding: "2px 8px", fontVariantNumeric: "tabular-nums" as const };
+  const inp = { background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, padding: "1px 6px", fontSize: 11, width: 56 };
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <h2 style={{ fontSize: 15, margin: "0 0 4px" }}>Divisioonien voittajat</h2>
+      <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8 }}>
+        Todennäköisyys = osuus simulaatioista, joissa joukkue voitti divisioonansa (eniten voittoja; tasatilanteet arvottu, ei NBA:n
+        tiebreak-sääntöjä). Syötä tarjottu kerroin, niin EV lasketaan.
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(330px, 1fr))", gap: 14 }}>
+        {Object.entries(DIVISIONS).map(([div, d]) => (
+          <div key={div} style={{ border: "1px solid #1f2937", borderRadius: 8, padding: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+              {div} <span style={{ color: "#64748b", fontWeight: 400 }}>({d.conf === "East" ? "Itä" : "Länsi"})</span>
+            </div>
+            <table style={{ borderCollapse: "collapse", fontSize: 11, width: "100%" }}>
+              <thead>
+                <tr style={{ color: "#64748b", textAlign: "left" }}>
+                  <th style={cell}>Joukkue</th>
+                  <th style={cell}>Voitot</th>
+                  <th style={cell}>P</th>
+                  <th style={cell}>Reilu</th>
+                  <th style={cell}>Kerroin</th>
+                  <th style={cell}>EV</th>
+                </tr>
+              </thead>
+              <tbody>
+                {d.teams
+                  .map((t) => by.get(t))
+                  .filter((r): r is SimResult => !!r)
+                  .sort((a, b) => b.pDiv - a.pDiv)
+                  .map((r) => {
+                    const o = parseFloat((odds[r.team] ?? "").replace(",", "."));
+                    const ev = Number.isFinite(o) ? r.pDiv * o - 1 : null;
+                    return (
+                      <tr key={r.team} style={{ borderTop: "1px solid #1f2937", color: "#cbd5e1" }}>
+                        <td style={cell}>{r.team}</td>
+                        <td style={cell}>{r.meanWins.toFixed(1)}</td>
+                        <td style={{ ...cell, fontWeight: 700 }}>{(r.pDiv * 100).toFixed(r.pDiv < 0.1 ? 1 : 0)} %</td>
+                        <td style={{ ...cell, color: "#94a3b8" }}>{fair(r.pDiv)}</td>
+                        <td style={cell}>
+                          <input value={odds[r.team] ?? ""} onChange={(e) => setOdds((x) => ({ ...x, [r.team]: e.target.value }))} placeholder="—" style={inp} />
+                        </td>
+                        <td style={{ ...cell, color: ev == null ? "#475569" : ev > 0.03 ? "#4ade80" : ev > 0 ? "#a3e635" : "#64748b", fontWeight: ev != null && ev > 0.03 ? 700 : 400 }}>
+                          {ev == null ? "" : `${(ev * 100).toFixed(1)} %`}
+                        </td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          </div>
+        ))}
       </div>
     </div>
   );
