@@ -105,6 +105,7 @@ const VENUE_LABEL: Record<Exclude<Venue, "auto">, string> = {
 const DEFAULT_PRE_HCA_FACTOR = 0.5;
 const PRE_HCA_KEY = "matchup_pre_hca_factor_v1";
 const VENUE_KEY = "matchup_venue_override_v1";
+const PRE_TOTAL_KEY = "matchup_pre_total_shift_v1";
 
 // Ottelun tempo joukkueiden pacejen perusteella.
 type PaceMethod = "excel" | "additive" | "average";
@@ -438,6 +439,72 @@ export default function MatchupPage() {
       return next;
     });
   }
+  // Harjoituspelien total-korjaus (pistettä per peli, molemmille joukkueille puolet).
+  const [preTotalShift, setPreTotalShiftState] = useState(0);
+  useEffect(() => {
+    try {
+      const v = Number(localStorage.getItem(PRE_TOTAL_KEY));
+      if (localStorage.getItem(PRE_TOTAL_KEY) != null && Number.isFinite(v)) setPreTotalShiftState(v);
+    } catch {
+      // ei haittaa
+    }
+  }, []);
+  function setPreTotalShift(v: number) {
+    if (!Number.isFinite(v)) return;
+    const c = Math.max(-30, Math.min(30, Math.round(v * 10) / 10));
+    setPreTotalShiftState(c);
+    try {
+      localStorage.setItem(PRE_TOTAL_KEY, String(c));
+    } catch {
+      // ei haittaa
+    }
+  }
+  type HistSum = { n: number; total: number | null; pace: number | null; nHome: number; nNeutral: number; homeMargin: number | null; homeMarginSe: number | null };
+  const [preHist, setPreHist] = useState<{ season: number; pre: HistSum; reg: HistSum }[] | null>(null);
+  const [preHistMsg, setPreHistMsg] = useState<string | null>(null);
+  async function loadPreHist() {
+    const y = Number(gameDate.slice(0, 4)) || new Date().getFullYear();
+    // Viimeiset kolme päättynyttä harjoituskautta (kuluva kausi mukaan, jos se on jo ohi).
+    const seasons = [y - 3, y - 2, y - 1];
+    setPreHist(null);
+    const got: { season: number; pre: HistSum; reg: HistSum }[] = [];
+    for (const s of seasons) {
+      setPreHistMsg(`Haetaan kautta ${s}-${String(s + 1).slice(2)} ESPN:stä...`);
+      try {
+        const r = await fetch(`/api/preseason-history?seasons=${s}`);
+        const j = await r.json();
+        if (!r.ok || j.error) throw new Error(j.error ?? `HTTP ${r.status}`);
+        got.push(...j.seasons);
+      } catch (e: any) {
+        setPreHistMsg(`Virhe kaudella ${s}: ${e?.message ?? e}`);
+        if (got.length) setPreHist(got);
+        return;
+      }
+    }
+    setPreHist(got);
+    setPreHistMsg(null);
+  }
+  const preHistSummary = (() => {
+    if (!preHist) return null;
+    const ok = preHist.filter((b) => b.pre.n >= 10 && b.reg.n >= 10 && b.pre.total != null && b.reg.total != null);
+    if (!ok.length) return null;
+    const mean = (xs: (number | null)[]) => {
+      const v = xs.filter((x): x is number => x != null);
+      return v.length ? v.reduce((a, x) => a + x, 0) / v.length : null;
+    };
+    const preHomeN = ok.reduce((a, b) => a + b.pre.nHome, 0);
+    const regHomeN = ok.reduce((a, b) => a + b.reg.nHome, 0);
+    const wMean = (f: (b: (typeof ok)[number]) => number | null, w: (b: (typeof ok)[number]) => number, N: number) =>
+      N > 0 ? ok.reduce((a, b) => a + (f(b) ?? 0) * w(b), 0) / N : null;
+    return {
+      nSeasons: ok.length,
+      totalDiff: mean(ok.map((b) => b.pre.total! - b.reg.total!)),
+      paceDiff: mean(ok.map((b) => (b.pre.pace != null && b.reg.pace != null ? b.pre.pace - b.reg.pace : null))),
+      preHome: wMean((b) => b.pre.homeMargin, (b) => b.pre.nHome, preHomeN),
+      regHome: wMean((b) => b.reg.homeMargin, (b) => b.reg.nHome, regHomeN),
+      preHomeN,
+    };
+  })();
   function setPreHcaFactor(v: number) {
     if (!Number.isFinite(v)) return;
     const c = Math.max(0, Math.min(1.5, v));
@@ -510,6 +577,16 @@ export default function MatchupPage() {
           if (typeof m.marginSd === "number") setMarginSd(m.marginSd);
           if (typeof m.totalSd === "number") setTotalSd(m.totalSd);
           if (m.ratingSource === "epm" || m.ratingSource === "darko" || m.ratingSource === "avg") setRatingSource(m.ratingSource);
+          if (typeof m.preHcaFactor === "number") setPreHcaFactor(m.preHcaFactor);
+          if (typeof m.preTotalShift === "number") setPreTotalShift(m.preTotalShift);
+          if (m.venues && typeof m.venues === "object") {
+            setVenueOverrideState(m.venues);
+            try {
+              localStorage.setItem(VENUE_KEY, JSON.stringify(m.venues));
+            } catch {
+              // ei haittaa
+            }
+          }
           setSettingsInfo("Asetukset ladattu tietokannasta.");
         }
       } catch {
@@ -639,6 +716,12 @@ export default function MatchupPage() {
   const modelSettings = {
     blendWeight, carry, leagueNorm, injuryAdj, marketWeight, paceShift, alpha, paceAlpha, paceMethod,
     b2bPaceAdj, b2bPenalty, threeInFourPenalty, marginSd, totalSd, ratingSource,
+    preHcaFactor, preTotalShift,
+    // Pelipaikat: vain viimeisen 60 päivän ottelut (avain alkaa päivämäärällä).
+    venues: (() => {
+      const cut = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
+      return Object.fromEntries(Object.entries(venueOverride).filter(([k]) => k.slice(0, 10) >= cut));
+    })(),
   };
   const modelSettingsJson = JSON.stringify(modelSettings);
   useEffect(() => {
@@ -866,9 +949,9 @@ export default function MatchupPage() {
   //   marginaali = (koti NET − vieras NET) × poss/100 + HCA − koti B2B + vieras B2B
   // Pisteet: oma ORTG + vastustajan DRTG − liigan keskitaso (additiivinen
   // vastustajakorjaus), skaalattuna pacella.
-  function project(hO: number, hD: number, aO: number, aD: number, pace: number, hca: number, hB2B: number, aB2B: number) {
-    const homePts = (hO + aD - leagueAvg) * (pace / 100) + hca / 2 - hB2B / 2 + aB2B / 2;
-    const awayPts = (aO + hD - leagueAvg) * (pace / 100) - hca / 2 + hB2B / 2 - aB2B / 2;
+  function project(hO: number, hD: number, aO: number, aD: number, pace: number, hca: number, hB2B: number, aB2B: number, totShift = 0) {
+    const homePts = (hO + aD - leagueAvg) * (pace / 100) + hca / 2 - hB2B / 2 + aB2B / 2 + totShift / 2;
+    const awayPts = (aO + hD - leagueAvg) * (pace / 100) - hca / 2 + hB2B / 2 - aB2B / 2 + totShift / 2;
     return { homePts, awayPts, margin: homePts - awayPts, total: homePts + awayPts };
   }
 
@@ -883,6 +966,9 @@ export default function MatchupPage() {
     const o = venueOverride[venueKey(h, a)];
     return o && o !== "auto" ? o : venueAuto(h, a);
   }
+  // Harjoituspeli = otteluohjelman mukaan harjoituspeli tai käsin valittu "Harjoituspeli (koti)".
+  const isPreGame = (h: string, a: string) => venueOf(h, a) === "pre" || venueAuto(h, a) === "pre";
+  const totShiftFor = (h: string, a: string) => (isPreGame(h, a) ? preTotalShift : 0);
   function hcaFor(t: TeamStats, a: string): number {
     const v = venueOf(t.team, a);
     const base = t.home_adv ?? 0;
@@ -896,8 +982,9 @@ export default function MatchupPage() {
     const hca = hcaFor(home, away.team);
     const hB2B = fatiguePts(fatigueOf(home.team));
     const aB2B = fatiguePts(fatigueOf(away.team));
-    const adj = project(homeFinal.finalOrtg, homeFinal.finalDrtg, awayFinal.finalOrtg, awayFinal.finalDrtg, pace, hca, hB2B, aB2B);
-    const base = project(homeFinal.modelOrtg, homeFinal.modelDrtg, awayFinal.modelOrtg, awayFinal.modelDrtg, pace, hca, hB2B, aB2B);
+    const ts = totShiftFor(home.team, away.team);
+    const adj = project(homeFinal.finalOrtg, homeFinal.finalDrtg, awayFinal.finalOrtg, awayFinal.finalDrtg, pace, hca, hB2B, aB2B, ts);
+    const base = project(homeFinal.modelOrtg, homeFinal.modelDrtg, awayFinal.modelOrtg, awayFinal.modelDrtg, pace, hca, hB2B, aB2B, ts);
     return { pace, hca, hB2B, aB2B, ...adj, base };
   })();
 
@@ -910,7 +997,7 @@ export default function MatchupPage() {
     if (!h || !a || !hf || !af) return null;
     const b2bCount = (fatigueOf(h.team) === "b2b" ? 1 : 0) + (fatigueOf(a.team) === "b2b" ? 1 : 0);
     const pace = gamePace(hf.paceActual, af.paceActual) + b2bPaceAdj * b2bCount;
-    return project(hf.finalOrtg, hf.finalDrtg, af.finalOrtg, af.finalDrtg, pace, hcaFor(h, a.team), fatiguePts(fatigueOf(h.team)), fatiguePts(fatigueOf(a.team)));
+    return project(hf.finalOrtg, hf.finalDrtg, af.finalOrtg, af.finalDrtg, pace, hcaFor(h, a.team), fatiguePts(fatigueOf(h.team)), fatiguePts(fatigueOf(a.team)), totShiftFor(h.team, a.team));
   }
 
   const parsedSpread = spreadLine.trim() === "" ? null : Number(spreadLine.replace(",", "."));
@@ -1315,6 +1402,9 @@ export default function MatchupPage() {
             <span style={{ fontSize: 12, color: "#94a3b8" }}>
               HCA {hcaFor(home, away.team).toFixed(1)}
               {venueOf(home.team, away.team) !== "normal" && <> (norm. {(home.home_adv ?? 0).toFixed(1)})</>}
+              {isPreGame(home.team, away.team) && preTotalShift !== 0 && (
+                <> · harj. total {preTotalShift > 0 ? "+" : ""}{preTotalShift.toFixed(1)}</>
+              )}
             </span>
             {venueOf(home.team, away.team) === "pre" && (
               <label style={{ fontSize: 12, color: "#94a3b8", display: "flex", alignItems: "center", gap: 4 }}>
@@ -1928,6 +2018,93 @@ export default function MatchupPage() {
             <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>
               Nostaa kaikkien lähtötempoa (hiipuu pelien myötä). Loka–marraskuussa tempo on ollut ~1.2–1.5 poss kauden keskiarvoa
               korkeampi. Kalibroi Kierros-näkymän napilla markkinan totaleihin.
+            </div>
+            <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>Harjoituspelien total-korjaus (pistettä / peli)</label>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
+              <input type="number" step="0.5" value={preTotalShift} onChange={(e) => setPreTotalShift(parseFloat(e.target.value) || 0)} style={{ ...smallInput, width: 70 }} />
+              <button onClick={loadPreHist} disabled={!!preHistMsg && preHistMsg.startsWith("Haetaan")} style={{ ...smallInput, padding: "4px 10px", cursor: "pointer" }}>
+                Hae 3 edellisen kauden harjoituspelit
+              </button>
+            </div>
+            {preHistMsg && <div style={{ fontSize: 11, color: preHistMsg.startsWith("Virhe") ? "#f87171" : "#94a3b8", marginBottom: 4 }}>{preHistMsg}</div>}
+            {preHist && preHist.length > 0 && (
+              <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4, overflowX: "auto" }}>
+                <table style={{ borderCollapse: "collapse", fontVariantNumeric: "tabular-nums" }}>
+                  <thead>
+                    <tr style={{ textAlign: "right" }}>
+                      <th style={{ textAlign: "left", padding: "2px 6px" }}>Kausi</th>
+                      <th style={{ padding: "2px 6px" }}>Harj. n</th>
+                      <th style={{ padding: "2px 6px" }}>Harj. total</th>
+                      <th style={{ padding: "2px 6px" }}>Runkos. 3 vk total</th>
+                      <th style={{ padding: "2px 6px" }}>Ero</th>
+                      <th style={{ padding: "2px 6px" }}>Harj. pace</th>
+                      <th style={{ padding: "2px 6px" }}>Runkos. pace</th>
+                      <th style={{ padding: "2px 6px" }}>Kotimarg. harj. / runkos.</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preHist.map((b) => (
+                      <tr key={b.season} style={{ textAlign: "right", borderTop: "1px solid #1f2937" }}>
+                        <td style={{ textAlign: "left", padding: "2px 6px" }}>{b.season}-{String(b.season + 1).slice(2)}</td>
+                        <td style={{ padding: "2px 6px" }}>{b.pre.n}{b.pre.nNeutral ? ` (${b.pre.nNeutral} neutr.)` : ""}</td>
+                        <td style={{ padding: "2px 6px" }}>{b.pre.total?.toFixed(1) ?? "—"}</td>
+                        <td style={{ padding: "2px 6px" }}>{b.reg.total?.toFixed(1) ?? "—"} ({b.reg.n})</td>
+                        <td style={{ padding: "2px 6px", color: "#e2e8f0" }}>
+                          {b.pre.total != null && b.reg.total != null ? `${b.pre.total - b.reg.total >= 0 ? "+" : ""}${(b.pre.total - b.reg.total).toFixed(1)}` : "—"}
+                        </td>
+                        <td style={{ padding: "2px 6px" }}>{b.pre.pace?.toFixed(1) ?? "—"}</td>
+                        <td style={{ padding: "2px 6px" }}>{b.reg.pace?.toFixed(1) ?? "—"}</td>
+                        <td style={{ padding: "2px 6px" }}>
+                          {b.pre.homeMargin != null ? `${b.pre.homeMargin >= 0 ? "+" : ""}${b.pre.homeMargin.toFixed(1)}` : "—"} /{" "}
+                          {b.reg.homeMargin != null ? `${b.reg.homeMargin >= 0 ? "+" : ""}${b.reg.homeMargin.toFixed(1)}` : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {preHistSummary && preHistSummary.totalDiff != null && (
+                  <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span>
+                      {preHistSummary.nSeasons} kauden keskiarvo: total{" "}
+                      <strong style={{ color: "#e2e8f0" }}>
+                        {preHistSummary.totalDiff >= 0 ? "+" : ""}
+                        {preHistSummary.totalDiff.toFixed(1)}
+                      </strong>{" "}
+                      p
+                      {preHistSummary.paceDiff != null && (
+                        <>
+                          , tempo {preHistSummary.paceDiff >= 0 ? "+" : ""}
+                          {preHistSummary.paceDiff.toFixed(1)} poss
+                        </>
+                      )}{" "}
+                      vs. runkosarjan alku
+                    </span>
+                    <button onClick={() => setPreTotalShift(preHistSummary.totalDiff!)} style={{ ...smallInput, padding: "2px 8px", cursor: "pointer" }}>
+                      Käytä {preHistSummary.totalDiff >= 0 ? "+" : ""}
+                      {preHistSummary.totalDiff.toFixed(1)}
+                    </button>
+                    {preHistSummary.preHome != null && preHistSummary.regHome != null && preHistSummary.regHome > 0.5 && (
+                      <>
+                        <span>
+                          · kotietu harj. {preHistSummary.preHome.toFixed(1)} vs. {preHistSummary.regHome.toFixed(1)} p (n={preHistSummary.preHomeN}, epävarma ±
+                          {(14 / Math.sqrt(Math.max(1, preHistSummary.preHomeN))).toFixed(1)})
+                        </span>
+                        <button
+                          onClick={() => setPreHcaFactor(Math.round(Math.max(0, Math.min(1.5, preHistSummary.preHome! / preHistSummary.regHome!)) * 10) / 10)}
+                          style={{ ...smallInput, padding: "2px 8px", cursor: "pointer" }}
+                        >
+                          Kotiedun kerroin {Math.max(0, Math.min(1.5, preHistSummary.preHome / preHistSummary.regHome)).toFixed(1)}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>
+              Lisätään vain harjoituspelien totaliin (otteluohjelman harjoituspelit ja käsin harjoituspeliksi merkityt). Vertailu: harjoituspelit vs.
+              saman kauden runkosarjan 3 ensimmäistä viikkoa, NBA-joukkueiden väliset pelit. Kotietu lasketaan ilman neutraaleja kenttiä.
+              Nykyinen kotiedun kerroin {preHcaFactor.toFixed(1)}.
             </div>
             <label style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>Väsymysvähennys: B2B / 3 peliä 4 pv (pistettä)</label>
             <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
