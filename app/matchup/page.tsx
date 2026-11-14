@@ -8,6 +8,7 @@ import { teamMinuteScale, canonTeam, type PrevRow } from "@/lib/prevSeason";
 import { computePreseason, calibrateCarry, WINS_PER_NET } from "@/lib/preseason";
 import { REPL_O, REPL_D } from "@/lib/availability";
 import { withRatings, RATING_LABEL, type RatingSource } from "@/lib/ratings";
+import { teamModelFor } from "@/lib/teamModel";
 
 type TeamStats = {
   id: string;
@@ -21,6 +22,9 @@ type TeamStats = {
   coach_change: boolean | null;
   home_adv: number | null;
   win_total?: number | null;
+  adj_ortg?: number | null; // käsin säätö (Teams-sivu)
+  adj_drtg?: number | null;
+  adj_pace?: number | null;
 };
 
 type Transaction = {
@@ -554,12 +558,16 @@ export default function MatchupPage() {
   const [secret, setSecretState] = useState("");
   // --- Mallin asetukset tietokantaan (app_settings.model): samat kaikilla laitteilla ---
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  // Liigan tehokkuussäätö (Teams-sivulla muokattava, app_settings.efficiency).
+  const [ortgShift, setOrtgShift] = useState(0);
   const [settingsInfo, setSettingsInfo] = useState<string | null>(null);
   useEffect(() => {
     (async () => {
       try {
         const j = await fetch("/api/settings").then((r) => r.json());
         if (j.error) setSettingsInfo(`Asetuksia ei saatu tietokannasta: ${j.error}`);
+        const effShift = Number(j?.settings?.efficiency?.ortgShift);
+        if (Number.isFinite(effShift)) setOrtgShift(effShift);
         const m = j?.settings?.model;
         if (m) {
           if (typeof m.blendWeight === "number") setBlendWeight(m.blendWeight);
@@ -862,36 +870,24 @@ export default function MatchupPage() {
     const resD = pr.resD;
 
     const played = gamesByTeam[team.team] ?? [];
-
-    // Kesän muutos (rosteri nyt vs. viime kauden vaikutusminuutit) lisätään
-    // lähtötasoon ennen EWMA:a, joten se hiipuu pelien myötä samaa tahtia kuin
-    // viime kauden luvut.
     const off = usePrev ? offseason[team.team] : undefined;
     const offO = pr.offO;
     const offD = pr.offD;
-    const ortgActual = ewma(ortgBlend + offO, played.map((g) => g.ortg), alpha);
-    const drtgActual = ewma(drtgBlend - offD, played.map((g) => g.drtg), alpha);
-    const paceActual = ewma(paceBlend, played.map((g) => g.pace), paceAlpha);
-
-    // Siirrot:
-    //  - vanha tila (ei viime kauden minuutteja): kaikki siirrot, vaimennus pelien mukaan
-    //  - uusi tila: vain kauden aikaiset siirrot. Ne ovat jo nykyisessä
-    //    rosterissa (eli lähtötasossa painolla (1−α)^kaikki pelit), joten
-    //    lisätään erotus niin, että paino on (1−α)^(pelit siirron jälkeen).
-    let net = { o: 0, d: 0 };
-    if (!usePrev) net = transactionNetFor(team.team);
-    else {
-      const before = played.filter((g) => g.date < refDate);
-      const wAll = Math.pow(1 - alpha, before.length);
-      for (const tx of transactions) {
-        if (tx.team !== team.team || tx.date < seasonStart) continue;
-        const wSince = Math.pow(1 - alpha, before.filter((g) => g.date >= tx.date).length);
-        net.o += (Number(tx.delta_o) || 0) * (wSince - wAll);
-        net.d += (Number(tx.delta_d) || 0) * (wSince - wAll);
-      }
-    }
-    const modelOrtg = ortgActual + net.o;
-    const modelDrtg = drtgActual - net.d;
+    // Sama laskenta kuin Teams-sivulla (lib/teamModel): lähtötaso + kesän muutos →
+    // EWMA → kauden aikaiset siirrot → Teams-sivun käsin säädöt + liigan tehokkuussäätö.
+    const tm = teamModelFor(team.team, pr, {
+      played,
+      transactions: transactions as any,
+      alpha,
+      paceAlpha,
+      usePrev,
+      seasonStart,
+      refDate,
+      adj: team,
+      ortgShift,
+    });
+    const { ortgActual, drtgActual, paceActual, modelOrtg, modelDrtg } = tm;
+    const net = { o: tm.netO, d: tm.netD };
 
     const lu = lineupFor(team.team);
     return {
@@ -908,6 +904,9 @@ export default function MatchupPage() {
       paceActual,
       netO: net.o,
       netD: net.d,
+      adjO: tm.adjO + tm.shift,
+      adjD: tm.adjD,
+      adjPace: tm.adjPace,
       modelOrtg,
       modelDrtg,
       lineupO: lu.o,
@@ -2130,7 +2129,7 @@ export default function MatchupPage() {
             <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ color: "#94a3b8", textAlign: "left" }}>
-                  {["Joukkue", "Lähtötaso O/D (regressoitu)", "Jäännös O/D (ennen regr.)", "Kesän muutos O/D", "Pelattu", "EWMA O/D", usePrev ? "Kauden siirrot O/D" : "Siirrot O/D", "Kokoonpano O/D", "Final ORTG", "Final DRTG", "Pace", "HCA"].map((h) => (
+                  {["Joukkue", "Lähtötaso O/D (regressoitu)", "Jäännös O/D (ennen regr.)", "Kesän muutos O/D", "Pelattu", "EWMA O/D", usePrev ? "Kauden siirrot O/D" : "Siirrot O/D", "Säätö O/D (Teams)", "Kokoonpano O/D", "Final ORTG", "Final DRTG", "Pace", "HCA"].map((h) => (
                     <th key={h} style={{ padding: 6 }}>
                       {h}
                     </th>
@@ -2161,6 +2160,10 @@ export default function MatchupPage() {
                     <td style={{ padding: 6 }}>
                       {signed(f.netO, 2)} / {signed(f.netD, 2)}
                     </td>
+                    <td style={{ padding: 6, color: f.adjO !== 0 || f.adjD !== 0 ? "#fbbf24" : undefined }}>
+                      {signed(f.adjO, 1)} / {signed(-f.adjD, 1)}
+                      {f.adjPace !== 0 && <span style={{ color: "#64748b" }}> · pace {signed(f.adjPace, 1)}</span>}
+                    </td>
                     <td style={{ padding: 6 }}>
                       {signed(f.lineupO, 2)} / {signed(f.lineupD, 2)}
                     </td>
@@ -2177,8 +2180,8 @@ export default function MatchupPage() {
             {usePrev
               ? "Kesän muutos = Σ nykyinen rosteri (EPM × oletusmin / 48) − Σ kauden 25-26 pelaajat (EPM × (kokonaisminuutit / 82) / 48); molemmat skaalattu 240 minuuttiin" + (leagueNorm ? ` − liigakeskiarvo (O ${offseasonNorm.meanO.toFixed(2)}, D ${offseasonNorm.meanD.toFixed(2)})` : "") + ". Se lisätään lähtötasoon ennen EWMA:a, joten se hiipuu pelien myötä. Kauden aikaiset siirrot painotetaan (1−α)^(pelit siirron jälkeen). "
               : "Kauden 25-26 minuutteja ei ole tallennettu (setup_season_baseline.sql), joten käytetään siirtolokia: "}
-            Final ORTG = EWMA ORTG + siirtojen O-delta + kokoonpanon O-delta. Final DRTG =
-            EWMA DRTG − treidien D-delta − kokoonpanon D-delta. Kokoonpanon delta = raaka EPM × (tämän ottelun min − oletus min) / 48:
+            Final ORTG = EWMA ORTG + siirtojen O-delta + Teams-sivun säätö (+ liigan tehokkuussäätö) + kokoonpanon O-delta. Final DRTG =
+            EWMA DRTG − treidien D-delta + Teams-sivun säätö − kokoonpanon D-delta. Kokoonpanon delta = raaka EPM × (tämän ottelun min − oletus min) / 48:
             poissa oleva pelaaja jonka minuutteja ei jaeta muille korvautuu siis korvaavan tason pelaajalla (O −1.0 / D −0.3 per 100). Tuplalaskennan
             korjaus: poissaolon vaikutus × (1−α)^(pelit jotka pelaaja on jo ollut poissa), koska EWMA on jo oppinut ne pelit; muiden
             lisäminuutit vaimenevat samassa suhteessa. Palanneelle lisätään takaisin se osa poissaolosta, joka on vielä joukkueen

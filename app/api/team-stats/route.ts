@@ -42,6 +42,9 @@ export async function POST(request: Request) {
     "wt_line",
     "wt_over",
     "wt_under",
+    "adj_ortg",
+    "adj_drtg",
+    "adj_pace",
   ] as const;
 
   const update: Record<string, any> = {};

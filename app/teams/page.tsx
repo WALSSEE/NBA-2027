@@ -6,6 +6,7 @@ import { computePreseason, loadPreSettings, loadPreSettingsRemote, DEFAULT_PRE_S
 import type { PrevRow } from "@/lib/prevSeason";
 import { withRatings } from "@/lib/ratings";
 import SourceCompare from "./SourceCompare";
+import { teamModelFor, gamesByTeamFrom, seasonStartFrom, type TxRow } from "@/lib/teamModel";
 
 type TeamStats = {
   id?: string;
@@ -22,11 +23,15 @@ type TeamStats = {
   wt_line?: number | null; // vedonlyöntilinja (esim. 43.5)
   wt_over?: number | null; // kerroin yli
   wt_under?: number | null; // kerroin alle
+  adj_ortg?: number | null; // käsin säätö mallin lukuihin (Matchup käyttää)
+  adj_drtg?: number | null;
+  adj_pace?: number | null;
 };
 
 type NumField = "ortg_2425" | "drtg_2425" | "pace_2425" | "ortg_2526" | "drtg_2526" | "pace_2526" | "home_adv" | "win_total" | "wt_line" | "wt_over" | "wt_under";
+type ModelKey = "m_net" | "m_ortg" | "m_drtg" | "m_pace";
 type CurKey = "cur_gp" | "cur_wpct" | "cur_net" | "cur_ortg" | "cur_drtg" | "cur_pace" | "cur_l10" | "cur_vs_pre";
-type SortKey = CurKey | "team" | "net_2425" | "net_2526" | "net_change" | "off_o" | "off_d" | "off_net" | "pre_ortg" | "pre_drtg" | "pre_net" | NumField;
+type SortKey = ModelKey | CurKey | "team" | "net_2425" | "net_2526" | "net_change" | "off_o" | "off_d" | "off_net" | "pre_ortg" | "pre_drtg" | "pre_net" | NumField;
 
 const ALL_TEAMS = Array.from(new Set(Object.values(TEAM_NAME_BY_ABBR))).sort();
 
@@ -113,6 +118,44 @@ function sortValue(row: TeamStats, key: SortKey): number | string | null {
   return row[key];
 }
 
+// Muokattava luku: näyttää arvon, muokkaus vahvistetaan Enterillä tai kentästä poistuttaessa.
+function EditCell({ value, changed, onCommit }: { value: number | null; changed: boolean; onCommit: (v: number) => void }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const shown = draft ?? (value == null ? "" : value.toFixed(1));
+  const commit = () => {
+    if (draft != null) {
+      const v = Number(draft.replace(",", "."));
+      if (draft.trim() !== "" && Number.isFinite(v)) onCommit(v);
+    }
+    setDraft(null);
+  };
+  return (
+    <td style={{ padding: 2 }}>
+      <input
+        value={shown}
+        disabled={value == null}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          if (e.key === "Escape") setDraft(null);
+        }}
+        style={{
+          width: 54,
+          background: "#1e293b",
+          color: changed ? "#fbbf24" : "#e2e8f0",
+          border: `1px solid ${changed ? "#b45309" : "#334155"}`,
+          borderRadius: 4,
+          padding: "4px 6px",
+          fontSize: 12,
+          fontWeight: 600,
+          textAlign: "right",
+        }}
+      />
+    </td>
+  );
+}
+
 export default function TeamsPage() {
   const [secret, setSecret] = useState("");
   const [rows, setRows] = useState<Record<string, TeamStats>>({});
@@ -122,8 +165,15 @@ export default function TeamsPage() {
   const [loading, setLoading] = useState(true);
   const [savingTeam, setSavingTeam] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
-  const [sortKey, setSortKey] = useState<SortKey>("cur_net");
+  const [sortKey, setSortKey] = useState<SortKey>("m_net");
   const [cur, setCur] = useState<Record<string, CurStats>>({});
+  // Matchupin käyttämät mallin luvut (samat asetukset kuin Matchupissa).
+  const [games, setGames] = useState<any[]>([]);
+  const [transactions, setTransactions] = useState<TxRow[]>([]);
+  const [alphas, setAlphas] = useState({ alpha: 0.05, paceAlpha: 0.08 });
+  const [ortgShift, setOrtgShift] = useState(0);
+  const [shiftDraft, setShiftDraft] = useState<string | null>(null);
+  const [shiftMsg, setShiftMsg] = useState<string | null>(null);
   // Kesän muutos ja preseason 26-27 (sama laskenta ja asetukset kuin Matchupissa).
   const [players, setPlayers] = useState<any[]>([]);
   const [prevRows, setPrevRows] = useState<PrevRow[]>([]);
@@ -137,12 +187,23 @@ export default function TeamsPage() {
     load();
     (async () => {
       try {
-        const [pj, rj, sj] = await Promise.all([
+        const [pj, rj, sj, tj, stj] = await Promise.all([
           fetch("/api/players/import").then((r) => r.json()),
           fetch("/api/prev-season").then((r) => r.json()),
           fetch("/api/schedule", { cache: "no-store" }).then((r) => r.json()).catch(() => ({ games: [] })),
+          fetch("/api/transactions").then((r) => r.json()).catch(() => ({ transactions: [] })),
+          fetch("/api/settings").then((r) => r.json()).catch(() => ({ settings: {} })),
         ]);
         setCur(currentSeason(sj.games ?? []));
+        setGames(sj.games ?? []);
+        setTransactions(tj.transactions ?? []);
+        const m = stj?.settings?.model ?? {};
+        setAlphas({
+          alpha: typeof m.alpha === "number" ? m.alpha : 0.05,
+          paceAlpha: typeof m.paceAlpha === "number" ? m.paceAlpha : 0.08,
+        });
+        const sh = Number(stj?.settings?.efficiency?.ortgShift);
+        setOrtgShift(Number.isFinite(sh) ? sh : 0);
         setPlayers(
           (pj.players ?? []).map((p: any) => ({
             ...p,
@@ -214,15 +275,90 @@ export default function TeamsPage() {
       setSortKey(key);
       // Nimi A-Ö nousevasti, luvut oletuksena suurin ensin — paitsi DRTG, jossa
       // pienin (paras puolustus) ensin.
-      setSortDesc(key !== "team" && !key.startsWith("drtg") && key !== "pre_drtg" && key !== "cur_drtg");
+      setSortDesc(key !== "team" && !key.startsWith("drtg") && key !== "pre_drtg" && key !== "cur_drtg" && key !== "m_drtg");
     }
   }
 
   const pre = useMemo(() => {
     const ts = Object.values(saved).filter((t) => t.ortg_2526 != null || t.ortg_2425 != null);
     if (ts.length === 0 || players.length === 0) return null;
-    return computePreseason(ts, withRatings(players, preSettings.ratingSource ?? "avg"), prevRows, preSettings);
-  }, [saved, players, prevRows, preSettings]);
+    return computePreseason(ts, withRatings(players, preSettings.ratingSource ?? "avg"), prevRows, preSettings, undefined, games.length ? games : undefined);
+  }, [saved, players, prevRows, preSettings, games]);
+
+  // Mallin luvut ilman käsin säätöä (sama laskenta kuin Matchupissa, ilman ottelukohtaista kokoonpanoa).
+  const modelBase = useMemo(() => {
+    if (!pre) return {} as Record<string, { gp: number; o: number; d: number; p: number }>;
+    const byTeam = gamesByTeamFrom(games);
+    const seasonStart = seasonStartFrom(games);
+    const today = new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
+    const out: Record<string, { gp: number; o: number; d: number; p: number }> = {};
+    for (const t of ALL_TEAMS) {
+      const pr = pre.byTeam[t];
+      if (!pr) continue;
+      const tm = teamModelFor(t, pr, {
+        played: byTeam[t] ?? [],
+        transactions,
+        alpha: alphas.alpha,
+        paceAlpha: alphas.paceAlpha,
+        usePrev: prevRows.length > 0,
+        seasonStart,
+        refDate: today,
+      });
+      out[t] = { gp: tm.gamesPlayed, o: tm.modelOrtg, d: tm.modelDrtg, p: tm.paceActual };
+    }
+    return out;
+  }, [pre, games, transactions, alphas, prevRows]);
+  // Lopullinen luku = malli + säätö. rowsFrom = tallennetut (järjestys) tai muokatut (näyttö).
+  const modelVal = (team: string, key: ModelKey, src: Record<string, TeamStats> = rows): number | null => {
+    const b = modelBase[team];
+    if (!b) return null;
+    const r = src[team];
+    const o = b.o + (Number(r?.adj_ortg) || 0);
+    const d = b.d + (Number(r?.adj_drtg) || 0);
+    if (key === "m_ortg") return o;
+    if (key === "m_drtg") return d;
+    if (key === "m_net") return o - d;
+    if (key === "m_pace") return b.p + (Number(r?.adj_pace) || 0);
+    return null;
+  };
+  // Liigan toteutunut ORTG vs. mallin keskiarvo (totalien taso).
+  const levelCheck = useMemo(() => {
+    let P = 0, OP = 0, n = 0;
+    for (const c of Object.values(cur)) {
+      if (c.ortg == null || c.pace == null) continue;
+      P += c.pace * c.gp;
+      OP += c.ortg * c.pace * c.gp;
+      n += c.gp;
+    }
+    const ms = Object.values(modelBase);
+    if (!n || !ms.length) return null;
+    const modelO = ms.reduce((s, m) => s + (m.o + m.d) / 2, 0) / ms.length;
+    const modelPace = ms.reduce((s, m) => s + m.p, 0) / ms.length;
+    const actualPace = Object.values(cur).filter((c) => c.pace != null).reduce((s, c) => s + (c.pace as number) * c.gp, 0) / n;
+    return { actual: OP / P, model: modelO, modelPace, actualPace };
+  }, [cur, modelBase]);
+  async function saveShift(v: number) {
+    setShiftMsg(null);
+    if (!secret) {
+      setShiftMsg("Tallennus vaatii CRON_SECRETin.");
+      return;
+    }
+    try {
+      const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+        body: JSON.stringify({ key: "efficiency", value: { ortgShift: v } }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) setShiftMsg(`Virhe: ${j.error ?? res.status}`);
+      else {
+        setOrtgShift(v);
+        setShiftMsg("Tallennettu — Matchup käyttää tätä.");
+      }
+    } catch (e: any) {
+      setShiftMsg(`Virhe: ${e?.message ?? e}`);
+    }
+  }
   const preVal = (team: string, key: SortKey): number | null => {
     const p = pre?.byTeam[team];
     if (!p) return null;
@@ -257,7 +393,9 @@ export default function TeamsPage() {
   const sortedTeams = useMemo(() => {
     const list = ALL_TEAMS.map((t) => saved[t] ?? emptyRow(t));
     const val = (r: TeamStats, k: SortKey) =>
-      k.startsWith("cur_") ? curVal(r.team, k as CurKey) : k.startsWith("off_") || k.startsWith("pre_") ? preVal(r.team, k) : sortValue(r, k);
+      k.startsWith("m_")
+        ? modelVal(r.team, k as ModelKey, saved)
+        : k.startsWith("cur_") ? curVal(r.team, k as CurKey) : k.startsWith("off_") || k.startsWith("pre_") ? preVal(r.team, k) : sortValue(r, k);
     return list.sort((a, b) => {
       const va = val(a, sortKey);
       const vb = val(b, sortKey);
@@ -267,7 +405,7 @@ export default function TeamsPage() {
       const cmp = typeof va === "string" ? va.localeCompare(vb as string) : (va as number) - (vb as number);
       return sortDesc ? -cmp : cmp;
     });
-  }, [saved, sortKey, sortDesc, pre, cur]);
+  }, [saved, sortKey, sortDesc, pre, cur, modelBase]);
 
   const inputStyle = {
     width: 60,
@@ -385,6 +523,59 @@ export default function TeamsPage() {
         )}
       </div>
 
+      <div
+        style={{
+          marginBottom: 16,
+          padding: "10px 12px",
+          background: "#111827",
+          border: "1px solid #1e293b",
+          borderRadius: 6,
+          fontSize: 12,
+          color: "#94a3b8",
+          maxWidth: 900,
+          lineHeight: 1.6,
+        }}
+      >
+        <strong style={{ color: "#f472b6" }}>Malli nyt</strong> = luvut, joita Matchup-laskuri käyttää ennen ottelukohtaista
+        kokoonpanoa: lähtötaso → EWMA pelatuista (α {alphas.alpha.toFixed(2)}, pace-α {alphas.paceAlpha.toFixed(2)}) → kauden
+        siirrot → <strong>käsin säätö</strong> (liigan tehokkuussäätö lisätään Matchupissa vielä kaikkien ORTG:hen). Muokkaa ORTG/DRTG/Pace suoraan (Enter) ja paina rivin Tallenna; muokattu luku tallentuu
+        säätönä mallin päälle, joten se liikkuu edelleen pelien mukana. Keltainen = säädetty. Trendin painoa (α) muutetaan
+        Matchupin asetuksista.
+        <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ color: "#e2e8f0" }}>Liigan tehokkuussäätö (ORTG kaikille, p/100):</span>
+          <input
+            value={shiftDraft ?? String(ortgShift)}
+            onChange={(e) => setShiftDraft(e.target.value)}
+            style={{ ...inputStyle, width: 56 }}
+          />
+          <button
+            onClick={() => {
+              const v = Number((shiftDraft ?? String(ortgShift)).replace(",", "."));
+              if (Number.isFinite(v)) saveShift(Math.max(-10, Math.min(10, Math.round(v * 10) / 10)));
+              setShiftDraft(null);
+            }}
+            style={{ background: "#2563eb", color: "white", border: "none", borderRadius: 4, padding: "4px 10px", fontSize: 11, cursor: "pointer" }}
+          >
+            Tallenna
+          </button>
+          {shiftMsg && <span style={{ color: shiftMsg.startsWith("Virhe") || shiftMsg.startsWith("Tallennus") ? "#f87171" : "#4ade80" }}>{shiftMsg}</span>}
+          <span>
+            Muuttaa totaleita (≈ 2 × säätö), ei tasoituksia. Esim. −1.0 laskee jokaisen ottelun totalia noin 2 pistettä.
+          </span>
+        </div>
+        {levelCheck && (
+          <div style={{ marginTop: 6 }}>
+            Toteutunut liigan ORTG 26-27: <strong style={{ color: "#e2e8f0" }}>{levelCheck.actual.toFixed(1)}</strong> · mallin
+            keskitaso (ilman säätöä): <strong style={{ color: "#e2e8f0" }}>{levelCheck.model.toFixed(1)}</strong> · ero{" "}
+            <strong style={{ color: levelCheck.actual - levelCheck.model < 0 ? "#f87171" : "#4ade80" }}>
+              {levelCheck.actual - levelCheck.model > 0 ? "+" : ""}
+              {(levelCheck.actual - levelCheck.model).toFixed(1)}
+            </strong>
+            . Tempo: toteutunut {levelCheck.actualPace.toFixed(1)} · malli {levelCheck.modelPace.toFixed(1)}.
+          </div>
+        )}
+      </div>
+
       {!loading && players.length > 0 && (
         <SourceCompare teams={Object.values(saved) as any} players={players} prevRows={prevRows} settings={preSettings} secret={secret} />
       )}
@@ -397,6 +588,9 @@ export default function TeamsPage() {
               <tr>
                 <th />
                 <th />
+                <th colSpan={6} style={{ ...groupHead, color: "#f472b6" }}>
+                  Malli nyt (Matchup käyttää)
+                </th>
                 <th colSpan={8} style={{ ...groupHead, color: "#fbbf24" }}>
                   Kausi 26-27 (toteutunut)
                 </th>
@@ -418,6 +612,14 @@ export default function TeamsPage() {
               <tr style={{ textAlign: "left" }}>
                 <th style={{ padding: "6px 4px", color: "#64748b" }}>#</th>
                 <SortHeader k="team" label="Joukkue" />
+                <SortHeader k="m_net" label="Net" title="Mallin Net (ORTG − DRTG), säädöt mukana" />
+                <SortHeader k="m_ortg" label="ORTG" title="Muokattava — tallentuu säätönä mallin päälle" />
+                <SortHeader k="m_drtg" label="DRTG" title="Muokattava — tallentuu säätönä mallin päälle" />
+                <SortHeader k="m_pace" label="Pace" title="Muokattava — tallentuu säätönä mallin päälle" />
+                <th style={{ padding: "6px 4px", color: "#94a3b8", whiteSpace: "nowrap" }} title="Käsin säätö O / D / Pace (D: + = huonompi puolustus)">
+                  Säätö
+                </th>
+                <th />
                 <SortHeader k="cur_wpct" label="V–H" title="Voitot–häviöt (järjestys voitto-%)" />
                 <SortHeader k="cur_net" label="Net" title="Toteutunut Net Rating 26-27 (ORTG − DRTG)" />
                 <SortHeader k="cur_ortg" label="ORTG" />
@@ -461,6 +663,61 @@ export default function TeamsPage() {
                   <tr key={team} style={{ borderTop: "1px solid #1e293b" }}>
                     <td style={{ padding: 4, color: "#475569", textAlign: "right" }}>{i + 1}</td>
                     <td style={{ padding: 4, whiteSpace: "nowrap" }}>{team}</td>
+                    {netCell(modelVal(team, "m_net"), true)}
+                    <EditCell
+                      value={modelVal(team, "m_ortg")}
+                      changed={!!Number(row.adj_ortg)}
+                      onCommit={(v) => updateField(team, "adj_ortg", Math.round((v - (modelBase[team]?.o ?? v)) * 10) / 10)}
+                    />
+                    <EditCell
+                      value={modelVal(team, "m_drtg")}
+                      changed={!!Number(row.adj_drtg)}
+                      onCommit={(v) => updateField(team, "adj_drtg", Math.round((v - (modelBase[team]?.d ?? v)) * 10) / 10)}
+                    />
+                    <EditCell
+                      value={modelVal(team, "m_pace")}
+                      changed={!!Number(row.adj_pace)}
+                      onCommit={(v) => updateField(team, "adj_pace", Math.round((v - (modelBase[team]?.p ?? v)) * 10) / 10)}
+                    />
+                    <td style={{ padding: "2px 6px", whiteSpace: "nowrap", fontSize: 11, color: "#94a3b8", fontVariantNumeric: "tabular-nums" }}>
+                      {Number(row.adj_ortg) || Number(row.adj_drtg) || Number(row.adj_pace) ? (
+                        <>
+                          <span style={{ color: "#fbbf24" }}>
+                            {[row.adj_ortg, row.adj_drtg, row.adj_pace].map((x) => `${(Number(x) || 0) > 0 ? "+" : ""}${(Number(x) || 0).toFixed(1)}`).join(" / ")}
+                          </span>
+                          <button
+                            onClick={() => {
+                              updateField(team, "adj_ortg", 0);
+                              updateField(team, "adj_drtg", 0);
+                              updateField(team, "adj_pace", 0);
+                            }}
+                            title="Nollaa säätö (muista Tallenna)"
+                            style={{ marginLeft: 4, background: "none", border: "1px solid #334155", color: "#94a3b8", borderRadius: 3, fontSize: 10, cursor: "pointer", padding: "0 4px" }}
+                          >
+                            ×
+                          </button>
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td style={{ padding: 2 }}>
+                      <button
+                        onClick={() => saveTeam(team)}
+                        disabled={savingTeam === team || !secret}
+                        style={{
+                          background: savingTeam === team || !secret ? "#334155" : "#2563eb",
+                          color: "white",
+                          border: "none",
+                          borderRadius: 4,
+                          padding: "4px 8px",
+                          fontSize: 11,
+                          cursor: savingTeam === team || !secret ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        {savingTeam === team ? "..." : "Tallenna"}
+                      </button>
+                    </td>
                     <td style={{ padding: "2px 8px", textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap", color: "#cbd5e1" }}>
                       {cur[team] ? `${cur[team].w}–${cur[team].l}` : "—"}
                     </td>
