@@ -25,9 +25,58 @@ type TeamStats = {
 };
 
 type NumField = "ortg_2425" | "drtg_2425" | "pace_2425" | "ortg_2526" | "drtg_2526" | "pace_2526" | "home_adv" | "win_total" | "wt_line" | "wt_over" | "wt_under";
-type SortKey = "team" | "net_2425" | "net_2526" | "net_change" | "off_o" | "off_d" | "off_net" | "pre_ortg" | "pre_drtg" | "pre_net" | NumField;
+type CurKey = "cur_gp" | "cur_wpct" | "cur_net" | "cur_ortg" | "cur_drtg" | "cur_pace" | "cur_l10" | "cur_vs_pre";
+type SortKey = CurKey | "team" | "net_2425" | "net_2526" | "net_change" | "off_o" | "off_d" | "off_net" | "pre_ortg" | "pre_drtg" | "pre_net" | NumField;
 
 const ALL_TEAMS = Array.from(new Set(Object.values(TEAM_NAME_BY_ABBR))).sort();
+
+// Kuluvan kauden (26-27) runkosarjan luvut pelatuista otteluista (schedule-taulu,
+// päivittyy päivittäin cronilla). ORTG/DRTG = otteluiden arvot painotettuna
+// hallintojen määrällä (pace), Net = ORTG − DRTG.
+type CurStats = { gp: number; w: number; l: number; ortg: number | null; drtg: number | null; pace: number | null; net: number | null; l10: number | null };
+const CUR_SEASON_START = "2026-10-15";
+
+function currentSeason(games: any[]): Record<string, CurStats> {
+  const per: Record<string, { w: number; l: number; rows: { date: string; o: number; d: number; p: number }[] }> = {};
+  const get = (t: string) => (per[t] ??= { w: 0, l: 0, rows: [] });
+  for (const g of games) {
+    if (g.season_type === "pre" || String(g.date) < CUR_SEASON_START) continue;
+    if (g.home_score == null || g.away_score == null) continue;
+    const hs = Number(g.home_score), as = Number(g.away_score);
+    const h = get(g.home), a = get(g.away);
+    if (hs > as) { h.w++; a.l++; } else { a.w++; h.l++; }
+    if (g.home_ortg != null && g.home_drtg != null && g.home_pace != null) {
+      h.rows.push({ date: g.date, o: Number(g.home_ortg), d: Number(g.home_drtg), p: Number(g.home_pace) });
+    }
+    if (g.away_ortg != null && g.away_drtg != null && g.away_pace != null) {
+      a.rows.push({ date: g.date, o: Number(g.away_ortg), d: Number(g.away_drtg), p: Number(g.away_pace || g.home_pace) });
+    }
+  }
+  const out: Record<string, CurStats> = {};
+  for (const [t, v] of Object.entries(per)) {
+    const rs = v.rows.sort((x, y) => x.date.localeCompare(y.date));
+    const agg = (xs: typeof rs) => {
+      const P = xs.reduce((s, r) => s + r.p, 0);
+      if (!xs.length || P <= 0) return null;
+      const o = xs.reduce((s, r) => s + r.o * r.p, 0) / P;
+      const d = xs.reduce((s, r) => s + r.d * r.p, 0) / P;
+      return { o, d, p: P / xs.length };
+    };
+    const all = agg(rs);
+    const last = agg(rs.slice(-10));
+    out[t] = {
+      gp: v.w + v.l,
+      w: v.w,
+      l: v.l,
+      ortg: all?.o ?? null,
+      drtg: all?.d ?? null,
+      pace: all?.p ?? null,
+      net: all ? all.o - all.d : null,
+      l10: last ? last.o - last.d : null,
+    };
+  }
+  return out;
+}
 
 function emptyRow(team: string): TeamStats {
   return {
@@ -73,7 +122,8 @@ export default function TeamsPage() {
   const [loading, setLoading] = useState(true);
   const [savingTeam, setSavingTeam] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
-  const [sortKey, setSortKey] = useState<SortKey>("pre_net");
+  const [sortKey, setSortKey] = useState<SortKey>("cur_net");
+  const [cur, setCur] = useState<Record<string, CurStats>>({});
   // Kesän muutos ja preseason 26-27 (sama laskenta ja asetukset kuin Matchupissa).
   const [players, setPlayers] = useState<any[]>([]);
   const [prevRows, setPrevRows] = useState<PrevRow[]>([]);
@@ -87,10 +137,12 @@ export default function TeamsPage() {
     load();
     (async () => {
       try {
-        const [pj, rj] = await Promise.all([
+        const [pj, rj, sj] = await Promise.all([
           fetch("/api/players/import").then((r) => r.json()),
           fetch("/api/prev-season").then((r) => r.json()),
+          fetch("/api/schedule", { cache: "no-store" }).then((r) => r.json()).catch(() => ({ games: [] })),
         ]);
+        setCur(currentSeason(sj.games ?? []));
         setPlayers(
           (pj.players ?? []).map((p: any) => ({
             ...p,
@@ -162,7 +214,7 @@ export default function TeamsPage() {
       setSortKey(key);
       // Nimi A-Ö nousevasti, luvut oletuksena suurin ensin — paitsi DRTG, jossa
       // pienin (paras puolustus) ensin.
-      setSortDesc(key !== "team" && !key.startsWith("drtg") && key !== "pre_drtg");
+      setSortDesc(key !== "team" && !key.startsWith("drtg") && key !== "pre_drtg" && key !== "cur_drtg");
     }
   }
 
@@ -183,11 +235,29 @@ export default function TeamsPage() {
     if (key === "pre_net") return p.seasonNet;
     return null;
   };
+  const curVal = (team: string, key: CurKey): number | null => {
+    const c = cur[team];
+    if (!c || c.gp === 0) return null;
+    if (key === "cur_gp") return c.gp;
+    if (key === "cur_wpct") return c.w / c.gp;
+    if (key === "cur_net") return c.net;
+    if (key === "cur_ortg") return c.ortg;
+    if (key === "cur_drtg") return c.drtg;
+    if (key === "cur_pace") return c.pace;
+    if (key === "cur_l10") return c.l10;
+    if (key === "cur_vs_pre") {
+      const pn = preVal(team, "pre_net");
+      return c.net == null || pn == null ? null : c.net - pn;
+    }
+    return null;
+  };
+  const curGames = Object.values(cur).reduce((s, c) => s + c.gp, 0) / 2;
 
   // Järjestys lasketaan tallennetuista arvoista; tyhjät aina viimeiseksi.
   const sortedTeams = useMemo(() => {
     const list = ALL_TEAMS.map((t) => saved[t] ?? emptyRow(t));
-    const val = (r: TeamStats, k: SortKey) => (k.startsWith("off_") || k.startsWith("pre_") ? preVal(r.team, k) : sortValue(r, k));
+    const val = (r: TeamStats, k: SortKey) =>
+      k.startsWith("cur_") ? curVal(r.team, k as CurKey) : k.startsWith("off_") || k.startsWith("pre_") ? preVal(r.team, k) : sortValue(r, k);
     return list.sort((a, b) => {
       const va = val(a, sortKey);
       const vb = val(b, sortKey);
@@ -197,7 +267,7 @@ export default function TeamsPage() {
       const cmp = typeof va === "string" ? va.localeCompare(vb as string) : (va as number) - (vb as number);
       return sortDesc ? -cmp : cmp;
     });
-  }, [saved, sortKey, sortDesc, pre]);
+  }, [saved, sortKey, sortDesc, pre, cur]);
 
   const inputStyle = {
     width: 60,
@@ -295,6 +365,9 @@ export default function TeamsPage() {
         sarakkeen otsikkoa järjestääksesi. Tallenna muutokset rivi kerrallaan.
       </p>
       <div style={{ fontSize: 12, color: "#64748b", margin: "-8px 0 16px", maxWidth: 900, lineHeight: 1.6 }}>
+        <strong style={{ color: "#fbbf24" }}>Kausi 26-27</strong> = toteutuneet runkosarjan luvut pelatuista otteluista (
+        {Math.round(curGames)} ottelua; päivittyy päivittäin). ORTG/DRTG painotettu hallinnoilla. <strong>L10</strong> = viimeisen 10
+        ottelun Net, <strong>vs. pre</strong> = toteutunut Net − Preseason-Net (+ = parempi kuin lähtötaso).{" "}
         <strong style={{ color: "#93c5fd" }}>Preseason 26-27</strong> = joukkueen lähtötaso ensimmäiseen otteluun: kausiblendi, regressio
         (pelaajat {preSettings.carry.player} % · jäännös {preSettings.carry.res} %), kesän muutos Transactionsista
         {preSettings.leagueNorm ? " (liigakeskiarvo vähennetty)" : ""}
@@ -324,6 +397,9 @@ export default function TeamsPage() {
               <tr>
                 <th />
                 <th />
+                <th colSpan={8} style={{ ...groupHead, color: "#fbbf24" }}>
+                  Kausi 26-27 (toteutunut)
+                </th>
                 <th colSpan={3} style={{ ...groupHead, color: "#93c5fd" }}>
                   Preseason 26-27
                 </th>
@@ -342,6 +418,14 @@ export default function TeamsPage() {
               <tr style={{ textAlign: "left" }}>
                 <th style={{ padding: "6px 4px", color: "#64748b" }}>#</th>
                 <SortHeader k="team" label="Joukkue" />
+                <SortHeader k="cur_wpct" label="V–H" title="Voitot–häviöt (järjestys voitto-%)" />
+                <SortHeader k="cur_net" label="Net" title="Toteutunut Net Rating 26-27 (ORTG − DRTG)" />
+                <SortHeader k="cur_ortg" label="ORTG" />
+                <SortHeader k="cur_drtg" label="DRTG" />
+                <SortHeader k="cur_pace" label="Pace" />
+                <SortHeader k="cur_l10" label="L10" title="Viimeisen 10 ottelun Net Rating" />
+                <SortHeader k="cur_vs_pre" label="vs. pre" title="Toteutunut Net − Preseason-Net" />
+                <SortHeader k="cur_gp" label="GP" />
                 <SortHeader k="pre_net" label="Net" title="Kauden 26-27 keskitaso: regressio + kesän muutos (+ win total -paino) − tunnetut pitkät poissaolot (poissa-merkintä ja arvioitu paluupäivä Matchupissa; minuutit korvaavan tason pelaajalle)" />
                 <SortHeader k="pre_ortg" label="ORTG" />
                 <SortHeader k="pre_drtg" label="DRTG" />
@@ -377,6 +461,16 @@ export default function TeamsPage() {
                   <tr key={team} style={{ borderTop: "1px solid #1e293b" }}>
                     <td style={{ padding: 4, color: "#475569", textAlign: "right" }}>{i + 1}</td>
                     <td style={{ padding: 4, whiteSpace: "nowrap" }}>{team}</td>
+                    <td style={{ padding: "2px 8px", textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap", color: "#cbd5e1" }}>
+                      {cur[team] ? `${cur[team].w}–${cur[team].l}` : "—"}
+                    </td>
+                    {netCell(curVal(team, "cur_net"), true)}
+                    {plainCell(curVal(team, "cur_ortg"))}
+                    {plainCell(curVal(team, "cur_drtg"))}
+                    {plainCell(curVal(team, "cur_pace"))}
+                    {netCell(curVal(team, "cur_l10"))}
+                    {deltaCell(curVal(team, "cur_vs_pre"))}
+                    <td style={{ padding: "2px 6px", textAlign: "right", color: "#64748b" }}>{cur[team]?.gp ?? 0}</td>
                     {netCell(preVal(team, "pre_net"), true)}
                     {plainCell(preVal(team, "pre_ortg"))}
                     {plainCell(preVal(team, "pre_drtg"))}
